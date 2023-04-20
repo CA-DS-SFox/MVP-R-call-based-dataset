@@ -380,14 +380,21 @@ fn_CALL_to_ANALYSIS <- function(df_calls_orig) {
     identity()  
 }
 
-fn_CALL_ReferenceData <- function(df_calls) {
+fn_CALL_ReferenceData <- function(df_analysis) {
+  source('R_INCLUDE_References.R')
   
+  df_joined <- df_analysis %>% 
+    left_join(df_ref_phonenos, by = c('systemendpoint.address' = 'ref.phone')) %>% 
+    left_join(df_ref_okta, by = c('agent.username' = 'okta_id')) %>% 
+    left_join(df_ref_mbr %>% select(member_aws, member_name, member_short), by = c('attributes.formember' = 'member_aws')) %>% 
+    left_join(df_ref_queue %>% select(ref.queue, ref.queue.service, ref.queue.description), by = c('queue.name' = 'ref.queue')) %>% 
+    left_join(df_ref_algroups %>% select(member_aws, member_group_called = member_group), by = c('attributes.formember' = 'member_aws')) %>% 
+    left_join(df_ref_algroups %>% select(member_aws, member_group_answer = member_group), by = c('member_okta' = 'member_aws')) %>% 
+    left_join(df_ref_single %>% select(single_queue, single_group), by = c('queue.name' = 'single_queue')) %>% 
+    identity()
   
-  
-  # adviser data from okta
-  df_joined <- df_calls 
-  
-  
+  return(df_joined)
+
 }
 
 

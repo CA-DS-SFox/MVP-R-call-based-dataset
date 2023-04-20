@@ -21,17 +21,11 @@ print(paste0(' ... Time taken ', t2 - t1))
 
 # -------------------------------------------------------------------------
 # join the reference data
-df_analysis <- df_calls %>% 
-#  select('systemendpoint.address', 'agent.username','attributes.formember', 'queue.name') %>% 
-  left_join(df_ref_phonenos, by = c('systemendpoint.address' = 'ref.phone')) %>% 
-  left_join(df_ref_okta %>% rename(member_okta = member_aws), by = c('agent.username' = 'okta_id')) %>% 
-  left_join(df_ref_mbr %>% select(member_aws, member_name, member_short), by = c('attributes.formember' = 'member_aws')) %>% 
-  left_join(df_ref_queue %>% select(ref.queue, ref.queue.service, ref.queue.description), by = c('queue.name' = 'ref.queue')) %>% 
-  left_join(df_ref_algroups %>% select(member_aws, member_group_called = member_group), by = c('attributes.formember' = 'member_aws')) %>% 
-  left_join(df_ref_algroups %>% select(member_aws, member_group_answer = member_group), by = c('member_okta' = 'member_aws')) %>% 
-  left_join(df_ref_single %>% select(single_queue, single_group), by = c('queue.name' = 'single_queue')) %>% 
-  identity()
 
+t1 <- Sys.time()
+df_refs <- fn_CALL_ReferenceData(df_analysis)
+t2 <- Sys.time()
+print(paste0(' ... Time taken ', t2 - t1))
 
 # -------------------------------------------------------------------------
 

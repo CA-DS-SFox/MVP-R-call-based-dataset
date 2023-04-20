@@ -5,7 +5,8 @@ ref_dir <- 'G:/Shared drives/CA - Interim Connect Report Log Files & Guidance/In
 # -------------------------------------------------------------------------
 # advisers from okta 
 ref_file_okta <- 'reporting_oktaadvisers.csv'
-df_ref_okta <- read_csv(paste0(ref_dir, ref_file_okta), col_types = cols(.default='c'))
+df_ref_okta <- read_csv(paste0(ref_dir, ref_file_okta), col_types = cols(.default='c')) %>% 
+  rename(member_okta = member_aws)
 if (df_ref_okta %>% count(okta_id) %>% filter(n > 1) %>% tally() > 0) {
   print(' ... Duplicate OKTA IDS !')
 } else {
@@ -57,4 +58,10 @@ if (df_ref_algroups %>% count(member_aws) %>% filter(n > 1) %>% tally() > 0) {
 # single queues
 ref_file_single <- 'reference_single_queue.parquet'
 df_ref_single <- read_parquet(paste0(ref_dir, ref_file_single), col_types = cols(.default='c'))
+if (df_ref_single %>% count(single_queue) %>% filter(n > 1) %>% tally() > 0) {
+  print(' ... Single groups Duplicates !')
+  df_ref_single %>% add_count(single_queue) %>% filter(n > 1)
+} else {
+  print(' ... Single queue data passed')
+}
 
