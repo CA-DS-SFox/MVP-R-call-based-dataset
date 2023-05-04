@@ -4,7 +4,7 @@ library(here)
 
 # -------------------------------------------------------------------------
 
-file_to_convert <- here('data','CTR-april.csv')
+file_to_convert <- paste0('C:/Users/Suzanne.Fox/Downloads/','CTR-april.csv')
 file_to_create <- here('data','CTR-april.parquet')
   
 df_in <- read_csv(file_to_convert, col_types = cols(.default = 'c'))
