@@ -502,7 +502,8 @@ fn_reorder <- function(df_input) {
                  "systemendpoint.address","ref.phone.service","ref.alink.service",
                  "customerendpoint.address",
                  "transferredtoendpoint.address", "ref.transfer.service",
-                 "queue.name","ref.queue.service","ref.queue.description","queue.duration",
+                 "queue.name","ref.queue.service","ref.queue.description", 
+                 "queue.duration",
                  "pipe.queue.hops", "pipe.queue.duration", "pipe.queue.total", 
                  "attributes.nationalreason",
                  "attributes.keypress",
@@ -709,6 +710,7 @@ fn_STRING_fixes <- function(text_in) {
   #print(text_in)
   text_out <- text_in
   text_out <- str_remove_all(text_out,"<speak>")
+  text_out <- str_remove_all(text_out,"\n")
   text_out <- str_remove_all(text_out,"</speak>")
   text_out <- str_remove_all(text_out, "<break time = '0.25s'/>")
   text_out <- str_remove_all(text_out, "<break time = '0.2s'/>")
