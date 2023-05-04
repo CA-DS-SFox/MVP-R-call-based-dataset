@@ -484,6 +484,7 @@ fn_CALL_dataset_defs <- function(df_input) {
     mutate(pipe.dataset_pen = case_when(ref.phone.service == 'Pension Wise' | ref.queue.service == 'Pension Wise' ~ 1, T ~ 0)) %>% 
     mutate(pipe.dataset_pho = case_when(ref.phone.service == 'Phones Team' | ref.queue.service == 'Phones Team' ~ 1, T ~ 0)) %>% 
     mutate(pipe.dataset_wit = case_when(ref.phone.service == 'Witness Service' | ref.queue.service == 'Witness Service' ~ 1, T ~ 0)) %>% 
+    mutate(pipe.dataset_dro = case_when(ref.phone.service == 'Durham DRO' | ref.queue.service == 'Durham DRO' ~ 1, T ~ 0)) %>% 
     mutate(pipe.dataset_fix = case_when(ref.phone.service == 'unclaimed' | ref.queue.service == 'unclaimed' ~ 1, T ~ 0)) %>% 
     identity()
   
@@ -546,6 +547,7 @@ fn_reorder <- function(df_input) {
                  "pipe.dataset_consumer_ops",
                  "pipe.dataset_consumer_srv",
                  "pipe.dataset_dudley",
+                 "pipe.dataset_dro",
                  "pipe.dataset_edf",
                  "pipe.dataset_eu",
                  "pipe.dataset_iow",
@@ -571,9 +573,9 @@ fn_REF_get <- function(what, show = FALSE) {
   # reference tables
   ref_dir <- 'G:/Shared drives/CA - Interim Connect Report Log Files & Guidance/Interim Reports/Reference Tables/'
   
-  print(paste0(' ... getting ref data from ',ref_dir))
   # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~  
   if (what == 'okta') {
+    print(paste0(' ... getting ref data from ',ref_dir))
     # advisers from okta 
     # join key is agent.username = okta_id
     ref_file_okta <- 'reporting_oktaadvisers.csv'
@@ -613,10 +615,17 @@ fn_REF_get <- function(what, show = FALSE) {
   
   # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~  
   if (what == 'phonenos') {
+    # late entries
+    df_late <- tribble(~ref.phone.service, ~ref.phone,
+                       "Durham DRO","+448081897301",
+                       "Durham DRO","+448081641912",
+                       "Durham DRO","+441917504080")
+                       
     # phone nos to service mapping
     ref_file_phonenos <- 'reference_phonenumbers.parquet'
     df_ref_phonenos <- read_parquet(paste0(ref_dir, ref_file_phonenos), col_types = cols(.default='c')) %>%
-      distinct(ref.phone.service, ref.phone)
+      distinct(ref.phone.service, ref.phone) %>% 
+      bind_rows(df_late)
     if (df_ref_phonenos %>% count(ref.phone) %>% filter(n > 1) %>% tally() > 0) {
       print(' ... MBR Duplicates !')
       df_ref_phonenos %>% add_count(ref.phone) %>% filter(n > 1)
@@ -629,10 +638,15 @@ fn_REF_get <- function(what, show = FALSE) {
   
   # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~  
   if (what == 'queue') {
+    # late entries
+    df_late <- tribble(~ref.queue.service, ~ref.queue, ~ref.queue.description,
+                       "Durham DRO","Q_950033_ser028", "Durham DRO (Debt Relief Orders)")
+    
     # queue name to service mapping
     ref_file_queue <- 'reference_queues.parquet'
     df_ref_queue <- read_parquet(paste0(ref_dir, ref_file_queue), col_types = cols(.default='c')) %>% 
-      mutate(ref.queue.description = case_when(ref.queue.description == '#REF!' ~ '', T ~ ref.queue.description))
+      mutate(ref.queue.description = case_when(ref.queue.description == '#REF!' ~ '', T ~ ref.queue.description)) %>% 
+      bind_rows(df_late)
     
     if (df_ref_queue %>% count(ref.queue) %>% filter(n > 1) %>% tally() > 0) {
       print(' ... Queue Duplicates !')
