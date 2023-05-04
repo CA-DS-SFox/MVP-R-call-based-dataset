@@ -9,7 +9,7 @@ source('R_INCLUDE_Functions.R')
 # -------------------------------------------------------------------------
 # Get Call and CTR data and apply the inclusion list
 
-month_to_process <- 'march'
+month_to_process <- 'april'
 
 df_ctrs <- read_parquet(here('data',paste0('data-',month_to_process,'-ctrs')))
 df_calls <- read_parquet(here('data',paste0('data-',month_to_process,'-calls')))
@@ -37,7 +37,8 @@ print(paste0(' ... Time taken ', round(difftime(t2, t1, units = "mins"), digits 
 
 # -------------------------------------------------------------------------
 # Save for future use
-# write_parquet(df_order, here('data','CALLS-ANALYSIS-march.parquet'))
+# write_parquet(df_order, here('data',paste0('CALLS-ANALYSIS-',month_to_process,'.parquet')))
+# write_csv(df_order, here('data',paste0('CALLS-ANALYSIS-',month_to_process,'.csv')))
 # -------------------------------------------------------------------------
 
 if (FALSE) {

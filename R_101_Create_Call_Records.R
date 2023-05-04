@@ -8,7 +8,7 @@ source('R_INCLUDE_Functions.R')
 # -------------------------------------------------------------------------
 # Get CTR data and apply the inclusion list
 
-month_to_process <- 'march'
+month_to_process <- 'april'
 
 df_ctr_0.orig <- fn_CTR_data_get(month = month_to_process)
 
@@ -29,20 +29,22 @@ print(paste0(' ... Cleaning pass 1, took ', round(difftime(t2, t1, units = "mins
 # -------------------------------------------------------------------------
 
 # Sense checks
-df_ctr_junk %>% 
-  count(leg_id, junk, pipe.call_type, initiationmethod, disconnectreason) %>%
-  pivot_wider(names_from = leg_id, values_from = n, values_fill = 0)
-
-df_ctr_single %>% 
-  count(leg_id, pipe.ctr_type, junk, pipe.call_type, initiationmethod, disconnectreason)
-
-df_ctr_multi %>% 
-  count(leg_id, pipe.ctr_type, junk, pipe.call_type, initiationmethod, disconnectreason) %>% 
-  pivot_wider(names_from = leg_id, values_from = n, values_fill = 0)
-
-df_ctr_multi %>% 
-  count(junk, pipe.call_type, pipe.ctr_type, initiationmethod, disconnectreason, leg_count) %>% 
-  pivot_wider(names_from = leg_count, values_from = n, values_fill = 0)
+if (FALSE) {
+  df_ctr_junk %>% 
+    count(leg_id, junk, pipe.call_type, initiationmethod, disconnectreason) %>%
+    pivot_wider(names_from = leg_id, values_from = n, values_fill = 0)
+  
+  df_ctr_single %>% 
+    count(leg_id, pipe.ctr_type, junk, pipe.call_type, initiationmethod, disconnectreason)
+  
+  df_ctr_multi %>% 
+    count(leg_id, pipe.ctr_type, junk, pipe.call_type, initiationmethod, disconnectreason) %>% 
+    pivot_wider(names_from = leg_id, values_from = n, values_fill = 0)
+  
+  df_ctr_multi %>% 
+    count(junk, pipe.call_type, pipe.ctr_type, initiationmethod, disconnectreason, leg_count) %>% 
+    pivot_wider(names_from = leg_count, values_from = n, values_fill = 0)
+}
 
 # -------------------------------------------------------------------------
 # Second cleaning pass, deal with valid transfer records
@@ -67,4 +69,4 @@ write_parquet(df_ctrs, here('data', paste0('data-',month_to_process,'-ctrs')))
 
 # -------------------------------------------------------------------------
 
-df_calls %>% count(pipe.ctr_type, leg_count)
+# df_calls %>% count(pipe.ctr_type, leg_count)
