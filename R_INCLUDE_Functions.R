@@ -1,14 +1,13 @@
 
 
-# read the .parquet file exported from AWS
-# select the variables that will be in Max's inclusion list
-
-# March data extracted like this ...
-# SELECT *
-# FROM contact_trace_records
-# WHERE initiationtimestamp > '2023-03-01T00:00:00Z' and initiationtimestamp < '2023-04-01T00:00:00Z'
-
-
+# RETURN the parquet data for the month specified from the data subfolder
+# parquet data for each month was manually extracted from the AWS table [prod-rap-data-science].[contact_trace_records]
+#     March data extracted like this ...
+#     SELECT *
+#     FROM contact_trace_records
+#     WHERE initiationtimestamp > '2023-03-01T00:00:00Z' and initiationtimestamp < '2023-04-01T00:00:00Z'
+# if reduce is set to TRUE then variables from the source data are reduced to those which (I assume) will be 
+# in Max's AWS inclusion list
 fn_CTR_data_get <- function(month = 'March', reduce = TRUE) {
   
   file_to_get <- here('data', paste0('CTR-', tolower(month) ,'.parquet'))
@@ -99,7 +98,8 @@ fn_CTR_data_get <- function(month = 'March', reduce = TRUE) {
   return(df_useful)
 }
 
-# remove spurious DISCONNECT and TRANSFER records to leave a clean CTR based dataset
+# remove spurious DISCONNECT and TRANSFER records to leave a clean CTR based dataset, then
+# RETURN a list of three dataframes, one for multi CTR calls, one for single CTR calls, one for junked records
 # NOTE : All DISCONNECT records are artefacts, same TRANSFER records for OUTBOUND
 #        but TRANSFER records for INBOUND seem valid
 fn_CTR_data_clean_pass1 <- function(df_input) {
@@ -265,7 +265,8 @@ fn_CTR_data_clean_pass1 <- function(df_input) {
   
 }
 
-# Only run this on multi-CTR datasets
+# COPE with any multi-CTR calls records which have a genuine TRANSFER
+# make the TRANSFER into a call of it's own 
 fn_CTR_data_clean_pass2 <- function(df_ctr_single, df_ctr_multiple) {
   
   # remove TRANSFER records from the Call CTR set
@@ -294,7 +295,7 @@ fn_CTR_data_clean_pass2 <- function(df_ctr_single, df_ctr_multiple) {
   return(df_list)
 }
 
-# Input MUST be a dataframe of multi-CTR calls
+# COLLAPSE the multi-CTR dataframe into a single Call record
 fn_CTR_data_clean_pass3 <- function(df_ctr_single, df_ctr_multi) {
   
   # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -335,6 +336,7 @@ fn_CTR_data_clean_pass3 <- function(df_ctr_single, df_ctr_multi) {
   return(df_call)
 }
 
+# NOT IMPLEMENTED YET
 # check that cleaning assumptions are still valid
 # CHECKS : OUTBOUND calls only have 1 leg, report otherwise
 # CHECKS : INBOUND transfer records don't look correct, timestamps overlap
@@ -343,10 +345,7 @@ fn_CTR_data_check <- function(df_ctr_clean) {
   return(df_checks)  
 }
 
-# data transformations to give analysable dataset
-# CREATES : dataframe called df_calls which is a dataframe where ...
-#           ROWS : represent call records
-#           COLS : transformed variables suitable for analysis
+# CREATE data transformations to give analysable dataset
 fn_CALL_to_ANALYSIS <- function(df_calls_input) {
   
   df_calls_output <- df_calls_input %>%
@@ -421,7 +420,7 @@ fn_CALL_to_ANALYSIS <- function(df_calls_input) {
   return(df_calls_output)
 }
 
-# this works for either calls or ctrs
+# JOIN the reference datasets
 fn_CALL_ReferenceData <- function(df_input) {
   # source('R_INCLUDE_References.R')
   
@@ -459,8 +458,7 @@ fn_CALL_ReferenceData <- function(df_input) {
 
 }
 
-# define service filters from either called number or queue
-# this works for either calls or ctrs
+# CREATE variables which define service filters from either called number or queue
 fn_CALL_dataset_defs <- function(df_input) {
   
   df_output <- df_input %>% 
@@ -491,7 +489,7 @@ fn_CALL_dataset_defs <- function(df_input) {
   return (df_output)
 }
 
-# put the final data in a human-friendly order
+# REFORMAT the final data into a human-friendly order
 fn_reorder <- function(df_input) {
   
   col_order <- c("pipe.ctr_setid","pipe.call_type",
@@ -567,7 +565,7 @@ fn_reorder <- function(df_input) {
     select(all_of(col_order))
 }
 
-# get reference datasets
+# RETURN reference datasets
 fn_REF_get <- function(what, show = FALSE) {
   
   what <- tolower(what)
@@ -704,7 +702,7 @@ fn_REF_get <- function(what, show = FALSE) {
   }
 }
 
-# remove hashtags from strings
+# REFORMAT remove hashtags etc from strings
 fn_STRING_fixes <- function(text_in) {
   
   #print(text_in)

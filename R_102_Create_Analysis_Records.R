@@ -42,12 +42,13 @@ print(paste0(' ... Time taken ', round(difftime(t2, t1, units = "mins"), digits 
 # -------------------------------------------------------------------------
 
 if (FALSE) {
-  examples <- c('99d0aa94-827e-48b0-a051-13315ead3f45',
-                'd22654dd-9c1c-4e7f-88c0-ec4f4600a532',
-                '1d5af545-aa46-45c1-81d4-a42240292861',
-                '00005b92-b7fb-4824-8cb0-4b3136deda41',
-                '0002bbf8-9343-4470-9839-d584bf219aa1',
-                '0038f7f2-bff7-46ed-a9ee-fcce9e03764b')
+  # april dataset
+  examples <- c('1add908f-4f0b-4e22-a839-375df5c1bda0',
+                '00068443-beeb-4c96-8194-f50f421001bc',
+                '388b877a-cbb6-43bd-bfb1-5df2848eefbb',
+                '0e8d9673-9631-4ea7-be4e-effbe480ab6b',
+                '000100da-57b2-4793-8872-404f5caaca42'
+                )
   
   df_examples <- df_order %>% 
     filter(pipe.ctr_setid %in% examples)
