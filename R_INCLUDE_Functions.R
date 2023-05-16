@@ -8,11 +8,11 @@
 #     WHERE initiationtimestamp > '2023-03-01T00:00:00Z' and initiationtimestamp < '2023-04-01T00:00:00Z'
 # if reduce is set to TRUE then variables from the source data are reduced to those which (I assume) will be 
 # in Max's AWS inclusion list
-fn_CTR_data_get <- function(month = 'March', reduce = TRUE) {
+fn_CTR_data_get <- function(month = 'March', reduce = TRUE, set_info = FALSE) {
   
   file_to_get <- here('data', paste0('CTR-', tolower(month) ,'.parquet'))
   print(paste0(' ... Getting ',file_to_get))
-
+  
   # get the March contact_trace_record CTR data 
   df <- read_parquet(file_to_get, col_types = cols(.default='c'))
   if (!reduce) {
@@ -95,245 +95,313 @@ fn_CTR_data_get <- function(month = 'March', reduce = TRUE) {
   # keep the columns from the include list
   df_useful <- df %>% select(all_of(cols_include_list))
   
+  # add a setid 
+  if (set_info == TRUE) {
+    print(' ... Adding the variables recording set information')
+    df_useful <- df_useful %>% 
+      # make a ctr_setid, and count the number of ctrs in the call
+      mutate(pipe.ctr_setid = case_when(is.na(initialcontactid) ~ contactid, T ~ initialcontactid), .before = 1) %>% 
+      group_by(pipe.ctr_setid) %>% 
+      mutate(pipe.ctr_orig = n(), .after = 'pipe.ctr_setid') %>% 
+      ungroup() %>% 
+      identity()
+    
+    rpt <- nrow(df_useful)
+      
+    rpt1 <- df_useful %>% 
+      distinct(pipe.ctr_setid) %>% 
+      tally()
+    
+    print(paste0(' ... ',rpt,' records for ',rpt1,' calls'))
+  }
+  
   return(df_useful)
 }
 
-# remove spurious DISCONNECT and TRANSFER records to leave a clean CTR based dataset, then
-# RETURN a list of three dataframes, one for multi CTR calls, one for single CTR calls, one for junked records
-# NOTE : All DISCONNECT records are artefacts, same TRANSFER records for OUTBOUND
-#        but TRANSFER records for INBOUND seem valid
-fn_CTR_data_clean_pass1 <- function(df_input) {
+# split into single ctr and multi ctr datasets
+fn_CTR_data_split <- function(df_in) {
   
-  # ~~~~~~~~~~~~~~~~~~
-  # first reduce the recordset by throwing away redundant records
-  df_ctr_basic <- df_input %>% 
-    # make a ctr_setid, and a variable to store the junk condition
-    mutate(pipe.ctr_setid = case_when(is.na(initialcontactid) ~ contactid, T ~ initialcontactid), .before = 1) %>%
-    # make dummy variables
-    mutate(pipe.ctr_orig = 0, .after = 'pipe.ctr_setid') %>% 
+  num_calls <- df_in %>% 
+    distinct(pipe.ctr_setid) %>% 
+    tally()
+  
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  print(' ... single CTR calls : extracting')
+  df_single <- df_in %>% 
+    filter(pipe.ctr_orig == 1) %>% 
+    mutate(pipe.ctr_legid = 1, .after = 'pipe.ctr_orig') %>% 
+    mutate(pipe.ctr_type = 'only', .after = 'pipe.ctr_legid') %>%
+    mutate(pipe.call_type = initiationmethod, .after = 'pipe.ctr_type') %>% 
+    mutate(pipe.call_inout_first = paste0(initiationmethod,' : ',disconnectreason), .after = 'pipe.call_type') %>% 
+    mutate(pipe.call_inout_final = '', .after = 'pipe.call_inout_first') %>% 
     mutate(pipe.ctr_junk = 0, .after = 'pipe.ctr_orig') %>% 
-    mutate(junk = 'NO', .after = 'pipe.ctr_junk') %>%
-    mutate(junk = case_when(initiationmethod == 'DISCONNECT' ~ 'DISCONNECT CTR', T ~ junk)) %>% 
-    mutate(leg_count = 0, .after = 'junk') %>% 
-    mutate(leg_id = 0, .after = 'leg_count') %>% 
-    mutate(dup_check = paste0(initiationmethod,':',initiationtimestamp,':',disconnectreason,':',disconnecttimestamp), .after = 'pipe.ctr_junk') %>% 
-    mutate(pipe.queue.hops = NA, .after = 'pipe.ctr_junk') %>% 
-    mutate(pipe.queue.duration = NA, .after = 'pipe.queue.hops') %>% 
-    mutate(pipe.queue.total = NA, .after = 'pipe.queue.duration') %>% 
-    # collect some original audit stats
+    mutate(pipe.ctr_junkreason = '', .after = 'pipe.ctr_junk') %>% 
+    identity()
+  rpt <- df_single %>% tally()
+  print(paste0(' ... There are ',rpt,' single CTR calls '))
+  
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  print(' ... multiple CTR calls : extracting')
+  df_multiple <- df_in %>% 
+    filter(pipe.ctr_orig > 1) %>% 
+    arrange(pipe.ctr_setid, initiationtimestamp) %>% 
     group_by(pipe.ctr_setid) %>% 
-    # original numbers of ctrs
-    mutate(pipe.ctr_orig = n()) %>% 
-    # number of ctrs junked
-    mutate(pipe.ctr_junk = sum(!junk == 'NO')) %>% 
+    mutate(pipe.ctr_legid = row_number(), .after = 'pipe.ctr_orig') %>% 
+    mutate(pipe.ctr_type = case_when(n() == 1 ~ 'only',
+                                     row_number() == 1 ~ 'first',
+                                     row_number() == n() ~ 'final',
+                                     T ~ 'middle'), .after = 'pipe.ctr_legid') %>% 
+    mutate(pipe.call_type = case_when(any(pipe.ctr_legid == 1 & initiationmethod == 'INBOUND') ~ 'INBOUND',
+                                      any(pipe.ctr_legid == 1 & initiationmethod == 'OUTBOUND') ~ 'OUTBOUND',
+                                      T ~ 'OTHER'), .after = 'pipe.ctr_type') %>% 
+    mutate(pipe.call_inout_first = paste0(initiationmethod,' : ',disconnectreason), .after = 'pipe.call_type') %>% 
+    mutate(pipe.call_inout_final = '', .after = 'pipe.call_inout_first') %>% 
     ungroup() %>% 
+    mutate(pipe.ctr_junk = 0, .after = 'pipe.ctr_orig') %>% 
+    mutate(pipe.ctr_junkreason = '', .after = 'pipe.ctr_junk') %>% 
+    identity()
+  rpt <- df_multiple %>% tally()
+  rpt2 <- df_multiple %>% distinct(pipe.ctr_setid) %>% tally()
+  print(paste0(' ... There are ',rpt2,' multi CTR calls across ',rpt,' records'))
+  
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  df_return <- list(single = df_single, 
+                    multiple = df_multiple)
+  return(df_return)
+  
+}
+
+# There are some bad records
+fn_CTR_data_junk <- function(df_single, df_multiple, remove = TRUE) {
+  
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # some single ctrs are disconnect from the start  
+  print(' ... Removing from single CTR calls - initiationmethod == DISCONNECT')
+  df_single <- df_single %>% 
+    mutate(pipe.ctr_junkreason = case_when(initiationmethod == 'DISCONNECT' ~ 'SINGLE CTR DISCONNECT',
+                                           T ~ pipe.ctr_junkreason)) %>% 
+    mutate(pipe.ctr_junk = case_when(pipe.ctr_junkreason != '' ~ 1,
+                                     T ~ pipe.ctr_junk)) %>% 
     identity()
   
-  # split off the junk records
-  df_ctr_junk <- df_ctr_basic %>% filter(!junk == 'NO')
-  df_ctr <- df_ctr_basic %>% filter(junk == 'NO')
+  rpt <- df_single %>% filter(pipe.ctr_junk == 1) %>% tally()
+  print(paste0(' ... ',rpt,' records removed'))
   
-  # ~~~~~~~~~~~~~~~~~~
-  df_ctr_useful <- df_ctr %>% 
-    # find the number of CTR legs in the call
-    group_by(pipe.ctr_setid) %>%
-    mutate(leg_count = n()) %>%
-    mutate(leg_id = row_number()) %>%
-    
-    # find the call type
-    mutate(pipe.call_type = case_when(any(initiationmethod == 'INBOUND') ~ 'INBOUND', 
-                                 any(initiationmethod == 'OUTBOUND') ~ 'OUTBOUND',
-                                 T ~ 'OTHER'), .after = 1) %>% 
-    
-    ungroup()
+  # remove junk records
+  if (remove) df_single <- df_single %>% filter(pipe.ctr_junk == 0)
   
-  # ~~~~~~~~~~~~~~~~~~
-  # then split into single leg calls and multi leg calls because
-  # single leg calls are fine as they are
-  df_ctr_single <- df_ctr_useful %>% filter(leg_count == 1)
-  df_ctr_multiple <- df_ctr_useful %>% filter(leg_count > 1)
-  
-  # ~~~~~~~~~~~~~~~~~~
-  # Now evaluate the multi CTR dataset for records to junk
-  df_ctr_eval <- df_ctr_multiple %>% 
-    
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # check for randomly created duplicates, weird outbound CTRs
+  print(' ... Removing from multi CTR calls - duplicate records')
+  df_multiple <- df_multiple %>% 
+    # use this to check for near duplicates
+    mutate(dup_check = paste0(initiationmethod,':',initiationtimestamp,':',disconnectreason,':',disconnecttimestamp)) %>% 
     group_by(pipe.ctr_setid) %>% 
-    arrange(pipe.ctr_setid, initiationtimestamp) %>% 
-    
-    # check for randomly created duplicates
-    mutate(junk = case_when(dup_check == lag(dup_check) ~ 'DUPLICATE OF PREVIOUS CTR', 
-                            T ~ junk)) %>% 
-    
-    # for outbound calls, throw away any legs greater than 1 with an inititationmethod of 'OUTBOUND'
-    # these seem to be duplicates on every occurance that I have checked
-    mutate(junk = case_when(row_number() > 1 & initiationmethod == 'OUTBOUND' ~ 'OUTBOUND NOT POSITION 1 IN CTR SET', 
-                            T ~ junk)) %>% 
-    
-    # for inbound calls, throw away any records with an initiationmethod of 'TRANSFER'
-    # and where the queue.name is blank AND the agent.username is blank, these seem to be system artefacts
-    mutate(junk = case_when(pipe.call_type == 'INBOUND' & 
-                              initiationmethod == 'TRANSFER' & 
-                              is.na(agent.username) & 
-                              is.na(queue.name) ~ 'INBOUND BLANK TRANSFERS', 
-                            T ~ junk)) %>% 
-    
-    # for outbound calls, throw away any records with an initiationmethod of 'TRANSFER'
-    # and where the agent.username is blank, these seem to be system artefacts
-    mutate(junk = case_when(pipe.call_type == 'OUTBOUND' & 
-                              initiationmethod == 'TRANSFER' & is.na(agent.username) ~ 'OUTBOUND BLANK TRANSFERS', 
-                            T ~ junk)) %>% 
-    
-    # for outbound calls, throw away any records with an initiationmethod of 'TRANSFER'
-    # and disconnectreason of 'CONTACT_FLOW_DISCONNECT' or 'CUSTOMER_DISCONNECT', these seem to be system artefacts
-    mutate(junk = case_when(pipe.call_type == 'OUTBOUND' &
-                              initiationmethod == 'TRANSFER' &
-                              disconnectreason %in% c('CONTACT_FLOW_DISCONNECT','CUSTOMER_DISCONNECT') ~ 'INBOUND TRANSFER TO CONTACT_FLOW_DISCONNECT',
-                            T ~ junk)) %>%
-    
-    # update the ctr_junk count
-    mutate(pipe.ctr_junk = pipe.ctr_junk + sum(!junk == 'NO')) %>% 
-    ungroup() 
-  
-  
-  # ~~~~~~~~~~~~~~~~~~
-  # add new junk records from the multiple CTR Call sets
-  df_ctr_junk <- df_ctr_junk %>% 
-    bind_rows(df_ctr_eval %>% filter(!junk == 'NO'))
-  
-  # these are ok, but now some will be single CTR sets
-  df_ctr_ok <- df_ctr_eval %>% filter(junk == 'NO')
-  
-  df_ctr_clean_single <- df_ctr_ok %>% 
-    group_by(pipe.ctr_setid) %>% 
-    filter(n() == 1) %>% 
-    ungroup()
-  
-  df_ctr_clean_multiple <- df_ctr_ok %>% 
-    group_by(pipe.ctr_setid) %>% 
-    filter(n() > 1) %>% 
-    ungroup()
-  
-  # reevaluate the datasets
-  df_ctr_single <- df_ctr_single %>% 
-    bind_rows(df_ctr_clean_single) %>% 
-    group_by(pipe.ctr_setid) %>%
-    mutate(leg_count = n()) %>%
-    mutate(leg_id = row_number()) %>%
-    ungroup()
-  
-  df_ctr_multiple <- df_ctr_clean_multiple %>% 
-  group_by(pipe.ctr_setid) %>%
-    mutate(leg_count = n()) %>%
-    mutate(leg_id = row_number()) %>%
-    ungroup()
-  
-  # ~~~~~~~~~~~~~~~~~~
-  df_ctr_junk <- df_ctr_junk %>% 
-    group_by(pipe.ctr_setid) %>% 
-    arrange(pipe.ctr_setid, initiationtimestamp) %>% 
-    mutate(pipe.ctr_type = case_when(n() == 1 ~ 'only',
-                                row_number() == 1 ~ 'first',
-                                row_number() == n() ~ 'final',
-                                T ~ 'middle'), .after = 7) %>%
-    ungroup()
-  
-  df_ctr_single <- df_ctr_single %>% 
-    group_by(pipe.ctr_setid) %>% 
-    arrange(pipe.ctr_setid, initiationtimestamp) %>% 
-    mutate(pipe.ctr_type = case_when(n() == 1 ~ 'only',
-                                row_number() == 1 ~ 'first',
-                                row_number() == n() ~ 'final',
-                                T ~ 'middle'), .after = 7) %>%
-    ungroup()
-  
-  df_ctr_multiple <- df_ctr_multiple %>% 
-    group_by(pipe.ctr_setid) %>% 
-    arrange(pipe.ctr_setid, initiationtimestamp) %>% 
-    mutate(pipe.ctr_type = case_when(n() == 1 ~ 'only',
-                                row_number() == 1 ~ 'first',
-                                row_number() == n() ~ 'final',
-                                T ~ 'middle'), .after = 7) %>%
+    mutate(pipe.ctr_junkreason = case_when(dup_check == lag(dup_check) ~ 'DUPLICATE OF PREVIOUS CTR', 
+                                           row_number() > 1 & initiationmethod == 'OUTBOUND' ~ 'OUTBOUND NOT CTR 1',
+                                           T ~ '')) %>% 
+    mutate(ctr_junk = case_when(pipe.ctr_junkreason != '' ~ 1, T ~ 0)) %>% 
+    mutate(pipe.ctr_junk = sum(ctr_junk)) %>% 
+    mutate(pipe.ctr_junkreason = last(pipe.ctr_junkreason)) %>% 
     ungroup()
 
-  # ~~~~~~~~~~~~~~~~~~
-
-  df_list <- list(ctr_single = df_ctr_single, 
-                  ctr_multi = df_ctr_multiple, 
-                  ctr_junk = df_ctr_junk)
+  rpt <- df_multiple %>% filter(ctr_junk == 1) %>% tally()
+  print(paste0(' ... ',rpt,' records removed'))
   
-  return(df_list)
+  # remove junk records
+  if (remove) {
+    df_multiple <- df_multiple %>% 
+      filter(ctr_junk == 0) %>% 
+      group_by(pipe.ctr_setid) %>% 
+      mutate(newcount = n()) %>% 
+      ungroup()
+    
+    # if any have become single ctr calls now, move them to the single dataset
+    df_new_single <- df_multiple %>% 
+      filter(newcount == 1) %>% 
+      select(-dup_check, -ctr_junk, - newcount)
+    
+    df_single <- df_single %>% 
+      bind_rows(df_new_single) %>% 
+      mutate(pipe.ctr_type = 'only')
+    
+    # and multiple we need to recalculate the first/middle/final
+    df_multiple <- df_multiple %>% 
+      filter(newcount > 1) %>% 
+      group_by(pipe.ctr_setid) %>% 
+      mutate(pipe.ctr_type = case_when(n() == 1 ~ 'only',
+                                       row_number() == 1 ~ 'first',
+                                       row_number() == n() ~ 'final',
+                                       T ~ 'middle'), .after = 'pipe.ctr_legid') %>% 
+      ungroup()
+  
+    }
+  
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # remove temp variables
+  df_multiple <- df_multiple %>% 
+    select(-dup_check, -ctr_junk, -newcount)
+  
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  df_return <- list(single = df_single, 
+                    multiple = df_multiple)
+  return(df_return)
   
 }
 
-# COPE with any multi-CTR calls records which have a genuine TRANSFER
-# make the TRANSFER into a call of it's own 
-fn_CTR_data_clean_pass2 <- function(df_ctr_single, df_ctr_multiple) {
+# make INBOUND TRANSFERS their own call
+fn_CTR_data_transfers <- function(df_single, df_multiple) {
   
-  # remove TRANSFER records from the Call CTR set
-  # the original Call set can be related from the initial or previous contactid
-  df_ctr <- df_ctr_multiple %>% 
-    mutate(pipe.ctr_setid = case_when(initiationmethod == 'TRANSFER' ~ contactid, T ~ pipe.ctr_setid)) %>% 
-    group_by(pipe.ctr_setid) %>% 
-    arrange(pipe.ctr_setid, initiationtimestamp) %>% 
-    mutate(pipe.ctr_type = case_when(n() == 1 ~ 'only',
-                                row_number() == 1 ~ 'first',
-                                row_number() == n() ~ 'final',
-                                T ~ 'middle'), .after = 7) %>%
-    ungroup()
+  print(' ... Checking multi CTR calls for initiationmethod == TRANSFER')
   
-  # add single records to the single dataset
-  df_ctr_2_single <- df_ctr %>% filter(pipe.ctr_type == 'only')
-  df_ctr_single <- df_ctr_single %>% bind_rows(df_ctr_2_single)
+  rpt <- df_multiple %>% filter(pipe.call_type == 'INBOUND' & initiationmethod == 'TRANSFER') %>% tally()
+  print(paste0(' ... ',rpt,' records moved to single dataset overwriting pipe.ctr_setid with contactid'))
   
-  # keep multiple ctr call sets
-  df_ctr_2_multi <- df_ctr %>% filter(pipe.ctr_type != 'only')
+  if (rpt > 0) {
+    # remove TRANSFER records from the multi CTR set
+    df_single <- df_single %>% 
+      bind_rows(df_multiple %>% 
+                  filter(pipe.call_type == 'INBOUND' & initiationmethod == 'TRANSFER') %>% 
+                  mutate(pipe.ctr_setid = contactid) %>% 
+                  mutate(pipe.ctr_type = 'only'))
+    
+    print(' ... Reorganising remaining multi CTR calls')
+    df_multiple <- df_multiple %>% 
+      filter(!(pipe.call_type == 'INBOUND' & initiationmethod == 'TRANSFER')) %>% 
+      group_by(pipe.ctr_setid) %>% 
+      mutate(pipe.ctr_type = case_when(n() == 1 ~ 'only',
+                                       row_number() == 1 ~ 'first',
+                                       row_number() == n() ~ 'final',
+                                       T ~ 'middle'), .after = 'pipe.ctr_legid') %>% 
+      ungroup()
+  }
   
-  # return
-  df_list <- list(ctr_single = df_ctr_single,
-                  ctr_multi = df_ctr_2_multi)
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  df_return <- list(single = df_single, 
+                    multiple = df_multiple)
+  return(df_return)
   
-  return(df_list)
 }
 
-# COLLAPSE the multi-CTR dataframe into a single Call record
-fn_CTR_data_clean_pass3 <- function(df_ctr_single, df_ctr_multi) {
+# collpse into calls
+fn_CTR_data_collapse <- function(df_single, df_multiple) {
   
-  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  # for single ctr calls queue info is just the same as the raw data
-  df_ctr_single <- df_ctr_single %>% 
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  print(' ... SINGLE CTR calls')
+  print(' ... single CTR calls : Adding spoof variables')
+  df_single <- df_single %>% 
     mutate(pipe.queue.hops = queue.name) %>% 
     mutate(pipe.queue.duration = queue.duration) %>% 
     mutate(pipe.queue.total = as.integer(queue.duration))
+  
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # for multiple-CTR outbound calls the FINAL record is always
+  # a TRANSFER record, but the rest of the variables are NA
+  print(' ... MULTI CTR calls')
+  print(' ... multi CTR calls : Getting inititation/disconnect from final record')
+  df_exit <- df_multiple %>% 
+    filter(pipe.ctr_type == 'final') %>% 
+    select(pipe.ctr_setid, exit = pipe.call_inout_first)
 
-  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  # for multi-ctr call datastes we need to collapse across all the ctrs
+  print(' ... MULTI CTR calls - OUTBOUND')
+  print(' ... multi CTR calls : Outbound calls, only first record has data')
+  rpt <- df_multiple %>% 
+    filter(pipe.call_type == 'OUTBOUND') %>% 
+    filter(pipe.ctr_type != 'first') %>% 
+    tally()
+  print(paste0(' ... loosing ', rpt,' non-informative outbound records'))
+  
+  df_outbound <- df_multiple %>% 
+    filter(pipe.call_type == 'OUTBOUND') %>% 
+    filter(pipe.ctr_type == 'first')
+
+  print(' ... multi CTR calls : Outbound calls, merge exit variable from final record')
+  df_out <- df_outbound %>% 
+    left_join(df_exit, by = 'pipe.ctr_setid') %>% 
+    mutate(pipe.call_inout_final = exit) %>% 
+    select(-exit)
+  
+  print(' ... multi CTR calls : Outbound calls, adding spoof variables')
+  df_out <- df_out %>% 
+    mutate(pipe.queue.hops = queue.name) %>% 
+    mutate(pipe.queue.duration = queue.duration) %>% 
+    mutate(pipe.queue.total = as.integer(queue.duration)) %>% 
+    mutate(pipe.ctr_type = 'only')
+  
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # for multiple-CTR inbound calls the FINAL record is sometimes
+  # DISCONNECT and sometimes QUEUE_TRANSFER these need to be handled differently
+
+  print(' ... MULTI CTR calls - INBOUND')
+  print(' ... multi CTR calls : Inbound calls, merge exit variable from final record')
+  df_inbound <- df_multiple %>% 
+    filter(pipe.call_type != 'OUTBOUND') %>% 
+    left_join(df_exit, by = 'pipe.ctr_setid') %>% 
+    mutate(pipe.call_inout_final = exit) %>% 
+    select(-exit)
+  
+  print(' ... multi CTR calls : Inbound calls, remove final record if it is inititationmethod = DISCONNECT')
+  rpt <- df_inbound %>% 
+    filter(initiationmethod == 'DISCONNECT') %>% 
+    tally()
+  print(paste0(' ... loosing ', rpt,' non-informative inbound records'))
+  
+  print(' ... multi CTR calls : Inbound calls, reorganising after record removal')
+  # now we need to throw away the final DISCONNECT records because there is no info on them
+  # they are different to when a final record which is QUEUE_TRANSFER and is informative
+  df_inbound <- df_inbound %>% 
+    filter(!initiationmethod == 'DISCONNECT') %>% 
+    group_by(pipe.ctr_setid) %>% 
+    mutate(pipe.ctr_type = case_when(n() == 1 ~ 'only',
+                                     row_number() == 1 ~ 'first',
+                                     row_number() == n() ~ 'final',
+                                     T ~ 'middle'), .after = 'pipe.ctr_legid') %>% 
+    ungroup()
+  
+  rpt <- df_inbound %>% 
+    filter(pipe.ctr_type != 'only') %>% 
+    distinct(pipe.ctr_setid) %>% 
+    tally()
+  print(paste0(' ... multi CTR calls : Inbound calls FINAL CLEAN COUNT ', rpt,' calls' ))
   
   # get queue info from across the whole record set
-  df_ctr_multi <- df_ctr_multi %>% 
+  print(' ... multi CTR calls : Inbound calls, counting queue hops over informative records')
+  df_inbound <- df_inbound %>% 
     group_by(pipe.ctr_setid) %>% 
     mutate(pipe.queue.hops = paste(queue.name, collapse = ', ')) %>% 
     mutate(pipe.queue.duration = paste(queue.duration, collapse = ', ')) %>% 
     mutate(pipe.queue.total = sum(as.integer(queue.duration))) %>% 
     ungroup() 
-  
-  # then get info from first ctr
-  df_first <- df_ctr_multi %>% 
+
+  print(' ... multi CTR calls : Inbound calls, create single call record from first and final records')
+  # then get info from first ctr, and add the exit variable
+  df_first <- df_inbound %>% 
     filter(pipe.ctr_type == 'first') %>% 
     select(pipe.ctr_setid:customerendpoint.address) %>% 
     mutate(pipe.ctr_type = 'multiple') %>%
     identity()
-    
-  df_final <- df_ctr_multi %>% 
+
+  df_final <- df_inbound %>% 
     filter(pipe.ctr_type == 'final') %>% 
     select(pipe.ctr_setid, transferredtoendpoint.address:last_col()) %>% 
     identity()
   
   # create a call record from the relevant bits of first, middle, final ctrs
-  df_call <- df_first %>% 
-    left_join(df_final, by = 'pipe.ctr_setid') %>% 
-    bind_rows(df_ctr_single)
+  df_in <- df_first %>% 
+    left_join(df_final, by = 'pipe.ctr_setid') 
   
-  return(df_call)
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  print(' ... combining single CTR and multi CTR output into call based dataset')
+  df_calls <- df_single %>% bind_rows(df_out) %>% bind_rows(df_in)
+
+  rpt <- df_calls %>% 
+    distinct(pipe.ctr_setid) %>% 
+    tally()
+  
+  print(paste0(' ... total calls : ', rpt,' calls' ))
+  
+  return(df_calls)
+  
 }
 
 # NOT IMPLEMENTED YET
@@ -389,16 +457,16 @@ fn_CALL_to_ANALYSIS <- function(df_calls_input) {
     # # total customer in-call time
     # mutate(dur_call = as.integer(difftime(agent.aftercontactworkstarttimestamp, agent.connectedtoagenttimestamp, unit = 'secs'))) %>%
     # # interaction time from connect
-    # mutate(dur_call_interact = as.integer(agent.agentinteractionduration)) %>%
-    # # hold time
-    # mutate(dur_call_hold = as.integer(agent.customerholdduration)) %>%
-    # # mutate(dur_aft = as.integer(difftime(agent.aftercontactworkendtimestamp, agent.aftercontactworkstarttimestamp, unit = 'secs'))) %>%
-    # mutate(dur_aft = as.integer(agent.aftercontactworkduration)) %>%
-    # mutate(dur_dis_upd = as.integer(difftime(lastupdatetimestamp, disconnecttimestamp, unit = 'secs'))) %>%
-    # mutate(dur_total = as.integer(difftime(lastupdatetimestamp, initiationtimestamp, unit = 'secs'))) %>%
-    
-    # flags
-    mutate(pipe.flag_weekday = case_when(pipe.when_day %in% c('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday') ~ 1, T ~ 0)) %>%
+  # mutate(dur_call_interact = as.integer(agent.agentinteractionduration)) %>%
+  # # hold time
+  # mutate(dur_call_hold = as.integer(agent.customerholdduration)) %>%
+  # # mutate(dur_aft = as.integer(difftime(agent.aftercontactworkendtimestamp, agent.aftercontactworkstarttimestamp, unit = 'secs'))) %>%
+  # mutate(dur_aft = as.integer(agent.aftercontactworkduration)) %>%
+  # mutate(dur_dis_upd = as.integer(difftime(lastupdatetimestamp, disconnecttimestamp, unit = 'secs'))) %>%
+  # mutate(dur_total = as.integer(difftime(lastupdatetimestamp, initiationtimestamp, unit = 'secs'))) %>%
+  
+  # flags
+  mutate(pipe.flag_weekday = case_when(pipe.when_day %in% c('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday') ~ 1, T ~ 0)) %>%
     mutate(pipe.flag_queued = case_when(!is.na(pipe.tm_quenq) ~ 1, T ~ 0)) %>%
     mutate(pipe.flag_queuednot = case_when(pipe.flag_queued == 1 ~0, T ~ 1)) %>%
     mutate(pipe.flag_answer = case_when(!is.na(pipe.tm_agcon) ~ 1, T ~ 0)) %>%
@@ -445,17 +513,17 @@ fn_CALL_ReferenceData <- function(df_input) {
   df_output <- df_output %>% 
     left_join(df_ref_algroups %>% select(member_aws, ref.formember.advicegroup = member_group), by = c('attributes.formember' = 'member_aws')) %>% 
     left_join(df_ref_algroups %>% select(member_aws, ref.okta.advicegroup = member_group), by = c('ref.okta.member' = 'member_aws')) 
-
+  
   df_ref_single <- fn_REF_get('single')
   df_output <- df_output %>% 
     left_join(df_ref_single %>% select(single_queue, ref.single_group = single_group), by = c('queue.name' = 'single_queue')) 
-    
+  
   df_ref_alink <- fn_REF_get('alink')
   df_output <- df_output %>% 
     left_join(df_ref_alink, by = c('systemendpoint.address' = 'ref.alink.phone'))
-
+  
   return(df_output)
-
+  
 }
 
 # CREATE variables which define service filters from either called number or queue
@@ -494,8 +562,7 @@ fn_reorder <- function(df_input) {
   
   col_order <- c("pipe.ctr_setid","pipe.call_type",
                  "pipe.ctr_orig", "pipe.ctr_junk","pipe.ctr_type",
-                 
-                 "contactid","initialcontactid","nextcontactid","previouscontactid",
+                 "pipe.call_inout_first","pipe.call_inout_final",                 
                  "initiationmethod","disconnectreason",
                  "systemendpoint.address","ref.phone.service","ref.alink.service",
                  "customerendpoint.address",
@@ -515,11 +582,11 @@ fn_reorder <- function(df_input) {
                  
                  "pipe.when_date","pipe.when_week","pipe.when_day","pipe.when_month","pipe.when_time","pipe.when_hour","pipe.when_minute","pipe.when_second",
                  "pipe.flag_weekday","pipe.flag_queued","pipe.flag_queuednot","pipe.flag_answer","pipe.flag_inbound","pipe.flag_outbound","pipe.flag_other","pipe.flag_answerin20","pipe.flag_calllonger30",
-
+                 
                  "agent.customerholdduration","agent.longestholdduration","agent.agentinteractionduration","agent.aftercontactworkduration",
                  "agent.numberofholds",
                  "agentconnectionattempts",
-
+                 
                  "attributes.servicename",
                  "attributes.finalservice",
                  "attributes.flowselection",
@@ -619,7 +686,7 @@ fn_REF_get <- function(what, show = FALSE) {
                        "Durham DRO","+448081897301",
                        "Durham DRO","+448081641912",
                        "Durham DRO","+441917504080")
-                       
+    
     # phone nos to service mapping
     ref_file_phonenos <- 'reference_phonenumbers.parquet'
     df_ref_phonenos <- read_parquet(paste0(ref_dir, ref_file_phonenos), col_types = cols(.default='c')) %>%
@@ -781,5 +848,245 @@ fn_STRING_fixes <- function(text_in) {
   text_out <- str_trim(text_out, "right")
   text_out <- str_trim(text_out, "left")
   return(text_out)
+}
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# OLD STUFF
+# remove spurious DISCONNECT and TRANSFER records to leave a clean CTR based dataset, then
+# RETURN a list of three dataframes, one for multi CTR calls, one for single CTR calls, one for junked records
+# NOTE : All DISCONNECT records are artefacts, same TRANSFER records for OUTBOUND
+#        but TRANSFER records for INBOUND seem valid
+fn_CTR_data_clean_pass1 <- function(df_input) {
+  
+  # ~~~~~~~~~~~~~~~~~~
+  # first reduce the recordset by throwing away redundant records
+  df_ctr_basic <- df_input %>% 
+    # make a ctr_setid, and a variable to store the junk condition
+    mutate(pipe.ctr_setid = case_when(is.na(initialcontactid) ~ contactid, T ~ initialcontactid), .before = 1) %>%
+    # make dummy variables
+    mutate(pipe.ctr_orig = 0, .after = 'pipe.ctr_setid') %>% 
+    mutate(pipe.ctr_junk = 0, .after = 'pipe.ctr_orig') %>% 
+    mutate(junk = 'NO', .after = 'pipe.ctr_junk') %>%
+    mutate(junk = case_when(initiationmethod == 'DISCONNECT' ~ 'DISCONNECT CTR', T ~ junk)) %>% 
+    mutate(leg_count = 0, .after = 'junk') %>% 
+    mutate(leg_id = 0, .after = 'leg_count') %>% 
+    mutate(dup_check = paste0(initiationmethod,':',initiationtimestamp,':',disconnectreason,':',disconnecttimestamp), .after = 'pipe.ctr_junk') %>% 
+    mutate(pipe.queue.hops = NA, .after = 'pipe.ctr_junk') %>% 
+    mutate(pipe.queue.duration = NA, .after = 'pipe.queue.hops') %>% 
+    mutate(pipe.queue.total = NA, .after = 'pipe.queue.duration') %>% 
+    # collect some original audit stats
+    group_by(pipe.ctr_setid) %>% 
+    # original numbers of ctrs
+    mutate(pipe.ctr_orig = n()) %>% 
+    # number of ctrs junked
+    mutate(pipe.ctr_junk = sum(!junk == 'NO')) %>% 
+    ungroup() %>% 
+    identity()
+  
+  # split off the junk records
+  df_ctr_junk <- df_ctr_basic %>% filter(!junk == 'NO')
+  df_ctr <- df_ctr_basic %>% filter(junk == 'NO')
+  
+  # ~~~~~~~~~~~~~~~~~~
+  df_ctr_useful <- df_ctr %>% 
+    # find the number of CTR legs in the call
+    group_by(pipe.ctr_setid) %>%
+    mutate(leg_count = n()) %>%
+    mutate(leg_id = row_number()) %>%
+    
+    # find the call type
+    mutate(pipe.call_type = case_when(any(initiationmethod == 'INBOUND') ~ 'INBOUND', 
+                                      any(initiationmethod == 'OUTBOUND') ~ 'OUTBOUND',
+                                      T ~ 'OTHER'), .after = 1) %>% 
+    
+    ungroup()
+  
+  # ~~~~~~~~~~~~~~~~~~
+  # then split into single leg calls and multi leg calls because
+  # single leg calls are fine as they are
+  df_ctr_single <- df_ctr_useful %>% filter(leg_count == 1)
+  df_ctr_multiple <- df_ctr_useful %>% filter(leg_count > 1)
+  
+  # ~~~~~~~~~~~~~~~~~~
+  # Now evaluate the multi CTR dataset for records to junk
+  df_ctr_eval <- df_ctr_multiple %>% 
+    
+    group_by(pipe.ctr_setid) %>% 
+    arrange(pipe.ctr_setid, initiationtimestamp) %>% 
+    
+    # check for randomly created duplicates
+    mutate(junk = case_when(dup_check == lag(dup_check) ~ 'DUPLICATE OF PREVIOUS CTR', 
+                            T ~ junk)) %>% 
+    
+    # for outbound calls, throw away any legs greater than 1 with an inititationmethod of 'OUTBOUND'
+    # these seem to be duplicates on every occurance that I have checked
+    mutate(junk = case_when(row_number() > 1 & initiationmethod == 'OUTBOUND' ~ 'OUTBOUND NOT POSITION 1 IN CTR SET', 
+                            T ~ junk)) %>% 
+    
+    # for inbound calls, throw away any records with an initiationmethod of 'TRANSFER'
+    # and where the queue.name is blank AND the agent.username is blank, these seem to be system artefacts
+    mutate(junk = case_when(pipe.call_type == 'INBOUND' & 
+                              initiationmethod == 'TRANSFER' & 
+                              is.na(agent.username) & 
+                              is.na(queue.name) ~ 'INBOUND BLANK TRANSFERS', 
+                            T ~ junk)) %>% 
+    
+    # for outbound calls, throw away any records with an initiationmethod of 'TRANSFER'
+    # and where the agent.username is blank, these seem to be system artefacts
+    mutate(junk = case_when(pipe.call_type == 'OUTBOUND' & 
+                              initiationmethod == 'TRANSFER' & is.na(agent.username) ~ 'OUTBOUND BLANK TRANSFERS', 
+                            T ~ junk)) %>% 
+    
+    # for outbound calls, throw away any records with an initiationmethod of 'TRANSFER'
+    # and disconnectreason of 'CONTACT_FLOW_DISCONNECT' or 'CUSTOMER_DISCONNECT', these seem to be system artefacts
+    mutate(junk = case_when(pipe.call_type == 'OUTBOUND' &
+                              initiationmethod == 'TRANSFER' &
+                              disconnectreason %in% c('CONTACT_FLOW_DISCONNECT','CUSTOMER_DISCONNECT') ~ 'INBOUND TRANSFER TO CONTACT_FLOW_DISCONNECT',
+                            T ~ junk)) %>%
+    
+    # update the ctr_junk count
+    mutate(pipe.ctr_junk = pipe.ctr_junk + sum(!junk == 'NO')) %>% 
+    ungroup() 
+  
+  
+  # ~~~~~~~~~~~~~~~~~~
+  # add new junk records from the multiple CTR Call sets
+  df_ctr_junk <- df_ctr_junk %>% 
+    bind_rows(df_ctr_eval %>% filter(!junk == 'NO'))
+  
+  # these are ok, but now some will be single CTR sets
+  df_ctr_ok <- df_ctr_eval %>% filter(junk == 'NO')
+  
+  df_ctr_clean_single <- df_ctr_ok %>% 
+    group_by(pipe.ctr_setid) %>% 
+    filter(n() == 1) %>% 
+    ungroup()
+  
+  df_ctr_clean_multiple <- df_ctr_ok %>% 
+    group_by(pipe.ctr_setid) %>% 
+    filter(n() > 1) %>% 
+    ungroup()
+  
+  # reevaluate the datasets
+  df_ctr_single <- df_ctr_single %>% 
+    bind_rows(df_ctr_clean_single) %>% 
+    group_by(pipe.ctr_setid) %>%
+    mutate(leg_count = n()) %>%
+    mutate(leg_id = row_number()) %>%
+    ungroup()
+  
+  df_ctr_multiple <- df_ctr_clean_multiple %>% 
+    group_by(pipe.ctr_setid) %>%
+    mutate(leg_count = n()) %>%
+    mutate(leg_id = row_number()) %>%
+    ungroup()
+  
+  # ~~~~~~~~~~~~~~~~~~
+  df_ctr_junk <- df_ctr_junk %>% 
+    group_by(pipe.ctr_setid) %>% 
+    arrange(pipe.ctr_setid, initiationtimestamp) %>% 
+    mutate(pipe.ctr_type = case_when(n() == 1 ~ 'only',
+                                     row_number() == 1 ~ 'first',
+                                     row_number() == n() ~ 'final',
+                                     T ~ 'middle'), .after = 7) %>%
+    ungroup()
+  
+  df_ctr_single <- df_ctr_single %>% 
+    group_by(pipe.ctr_setid) %>% 
+    arrange(pipe.ctr_setid, initiationtimestamp) %>% 
+    mutate(pipe.ctr_type = case_when(n() == 1 ~ 'only',
+                                     row_number() == 1 ~ 'first',
+                                     row_number() == n() ~ 'final',
+                                     T ~ 'middle'), .after = 7) %>%
+    ungroup()
+  
+  df_ctr_multiple <- df_ctr_multiple %>% 
+    group_by(pipe.ctr_setid) %>% 
+    arrange(pipe.ctr_setid, initiationtimestamp) %>% 
+    mutate(pipe.ctr_type = case_when(n() == 1 ~ 'only',
+                                     row_number() == 1 ~ 'first',
+                                     row_number() == n() ~ 'final',
+                                     T ~ 'middle'), .after = 7) %>%
+    ungroup()
+  
+  # ~~~~~~~~~~~~~~~~~~
+  
+  df_list <- list(ctr_single = df_ctr_single, 
+                  ctr_multi = df_ctr_multiple, 
+                  ctr_junk = df_ctr_junk)
+  
+  return(df_list)
+  
+}
+
+# COPE with any multi-CTR calls records which have a genuine TRANSFER
+# make the TRANSFER into a call of it's own 
+fn_CTR_data_clean_pass2 <- function(df_ctr_single, df_ctr_multiple) {
+  
+  # remove TRANSFER records from the Call CTR set
+  # the original Call set can be related from the initial or previous contactid
+  df_ctr <- df_ctr_multiple %>% 
+    mutate(pipe.ctr_setid = case_when(initiationmethod == 'TRANSFER' ~ contactid, T ~ pipe.ctr_setid)) %>% 
+    group_by(pipe.ctr_setid) %>% 
+    arrange(pipe.ctr_setid, initiationtimestamp) %>% 
+    mutate(pipe.ctr_type = case_when(n() == 1 ~ 'only',
+                                     row_number() == 1 ~ 'first',
+                                     row_number() == n() ~ 'final',
+                                     T ~ 'middle'), .after = 7) %>%
+    ungroup()
+  
+  # add single records to the single dataset
+  df_ctr_2_single <- df_ctr %>% filter(pipe.ctr_type == 'only')
+  df_ctr_single <- df_ctr_single %>% bind_rows(df_ctr_2_single)
+  
+  # keep multiple ctr call sets
+  df_ctr_2_multi <- df_ctr %>% filter(pipe.ctr_type != 'only')
+  
+  # return
+  df_list <- list(ctr_single = df_ctr_single,
+                  ctr_multi = df_ctr_2_multi)
+  
+  return(df_list)
+}
+
+# COLLAPSE the multi-CTR dataframe into a single Call record
+fn_CTR_data_clean_pass3 <- function(df_ctr_single, df_ctr_multi) {
+  
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # for single ctr calls queue info is just the same as the raw data
+  df_ctr_single <- df_ctr_single %>% 
+    mutate(pipe.queue.hops = queue.name) %>% 
+    mutate(pipe.queue.duration = queue.duration) %>% 
+    mutate(pipe.queue.total = as.integer(queue.duration))
+  
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # for multi-ctr call datastes we need to collapse across all the ctrs
+  
+  # get queue info from across the whole record set
+  df_ctr_multi <- df_ctr_multi %>% 
+    group_by(pipe.ctr_setid) %>% 
+    mutate(pipe.queue.hops = paste(queue.name, collapse = ', ')) %>% 
+    mutate(pipe.queue.duration = paste(queue.duration, collapse = ', ')) %>% 
+    mutate(pipe.queue.total = sum(as.integer(queue.duration))) %>% 
+    ungroup() 
+  
+  # then get info from first ctr
+  df_first <- df_ctr_multi %>% 
+    filter(pipe.ctr_type == 'first') %>% 
+    select(pipe.ctr_setid:customerendpoint.address) %>% 
+    mutate(pipe.ctr_type = 'multiple') %>%
+    identity()
+  
+  df_final <- df_ctr_multi %>% 
+    filter(pipe.ctr_type == 'final') %>% 
+    select(pipe.ctr_setid, transferredtoendpoint.address:last_col()) %>% 
+    identity()
+  
+  # create a call record from the relevant bits of first, middle, final ctrs
+  df_call <- df_first %>% 
+    left_join(df_final, by = 'pipe.ctr_setid') %>% 
+    bind_rows(df_ctr_single)
+  
+  return(df_call)
 }
 
