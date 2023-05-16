@@ -97,7 +97,7 @@ fn_CTR_data_get <- function(month = 'March', reduce = TRUE, set_info = FALSE) {
   
   # add a setid 
   if (set_info == TRUE) {
-    print(' ... Adding the variables recording set information')
+    print(' ... Adding the variables that define a call set')
     df_useful <- df_useful %>% 
       # make a ctr_setid, and count the number of ctrs in the call
       mutate(pipe.ctr_setid = case_when(is.na(initialcontactid) ~ contactid, T ~ initialcontactid), .before = 1) %>% 
@@ -416,6 +416,8 @@ fn_CTR_data_check <- function(df_ctr_clean) {
 # CREATE data transformations to give analysable dataset
 fn_CALL_to_ANALYSIS <- function(df_calls_input) {
   
+  print(' ... Creating transformed variables')
+  
   df_calls_output <- df_calls_input %>%
     # for inbound timestamps initiation == connected
     # for outbound etc, init is when the operator started some action, and connected is when the call was answered
@@ -489,8 +491,10 @@ fn_CALL_to_ANALYSIS <- function(df_calls_input) {
 }
 
 # JOIN the reference datasets
-fn_CALL_ReferenceData <- function(df_input) {
+fn_CALL_ReferenceData <- function(df_input, google = TRUE) {
   # source('R_INCLUDE_References.R')
+  
+  print(' ... Joining reference data')
   
   df_ref_okta <- fn_REF_get('okta')
   df_output <- df_input %>% 
@@ -500,10 +504,23 @@ fn_CALL_ReferenceData <- function(df_input) {
   df_output <- df_output %>% 
     left_join(df_ref_mbr %>% select(member_aws, ref.lss.fullname, ref.lss.shortname), by = c('attributes.formember' = 'member_aws')) 
   
-  df_ref_phonenos <- fn_REF_get('phonenos')
-  df_output <- df_output %>% 
-    left_join(df_ref_phonenos, by = c('systemendpoint.address' = 'ref.phone')) %>% 
-    left_join(df_ref_phonenos %>% select(ref.transferno = ref.phone, ref.transfer.service = ref.phone.service), by = c('transferredtoendpoint.address' = 'ref.transferno'))
+  if (google == TRUE) {
+    print(' ... getting google data and creating date range')
+    # date range based join
+    df_ref_phonenos <- fn_REF_get('phonenos', google = TRUE)
+    
+    df_output <- df_output %>% 
+      left_join(df_ref_phonenos, by = c('systemendpoint.address' = 'ref.phone', 'pipe.when_date' = 'date_valid'))
+    
+    df_output <- df_output %>% 
+      left_join(df_ref_phonenos %>% select(ref.transferno = ref.phone, ref.transfer.service = ref.phone.service, date_valid), 
+                by = c('transferredtoendpoint.address' = 'ref.transferno', 'pipe.when_date' = 'date_valid'))
+  } else {
+    df_ref_phonenos <- fn_REF_get('phonenos')
+    df_output <- df_output %>% 
+      left_join(df_ref_phonenos, by = c('systemendpoint.address' = 'ref.phone')) %>% 
+      left_join(df_ref_phonenos %>% select(ref.transferno = ref.phone, ref.transfer.service = ref.phone.service), by = c('transferredtoendpoint.address' = 'ref.transferno'))
+  }
   
   df_ref_queue <- fn_REF_get('queue')
   df_output <- df_output %>% 
@@ -528,6 +545,8 @@ fn_CALL_ReferenceData <- function(df_input) {
 
 # CREATE variables which define service filters from either called number or queue
 fn_CALL_dataset_defs <- function(df_input) {
+  
+  print(' ... Creating dataset filters')
   
   df_output <- df_input %>% 
     mutate(pipe.dataset_advice_line = case_when(ref.phone.service == 'Adviceline' | ref.queue.service == 'Adviceline' ~ 1, T ~ 0)) %>% 
@@ -559,6 +578,8 @@ fn_CALL_dataset_defs <- function(df_input) {
 
 # REFORMAT the final data into a human-friendly order
 fn_reorder <- function(df_input) {
+  
+  print(' ... Reordering variables for human readability')
   
   col_order <- c("pipe.ctr_setid","pipe.call_type",
                  "pipe.ctr_orig", "pipe.ctr_junk","pipe.ctr_type",
@@ -633,11 +654,137 @@ fn_reorder <- function(df_input) {
 }
 
 # RETURN reference datasets
-fn_REF_get <- function(what, show = FALSE) {
+fn_REF_get <- function(what, show = FALSE, google = FALSE, raw = FALSE) {
+  
+  what <- tolower(what)
+  valid_whats <- c('okta','mbr','phonenos','queue','algroup','single','alink')
+  if (!(what %in% valid_whats)) {
+    print(paste0(' ... ',what,' is not in valid arguements of ',paste0(valid_whats, collapse = ',')))
+  }
   
   what <- tolower(what)
   # reference tables
   ref_dir <- 'G:/Shared drives/CA - Interim Connect Report Log Files & Guidance/Interim Reports/Reference Tables/'
+  ref_sheet <- 'https://docs.google.com/spreadsheets/d/1FEcmgQmYk_Dmf9IgjM1CdYjSFTMQzHB2DyiMpzpbCas/edit#gid=1612332652'
+  
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~  
+  if (what == 'phonenos') {
+    if (google == FALSE) {
+      # late entries
+      df_late <- tribble(~ref.phone.service, ~ref.phone,
+                         "Durham DRO","+448081897301",
+                         "Durham DRO","+448081641912",
+                         "Durham DRO","+441917504080")
+      
+      # phone nos to service mapping
+      ref_file_phonenos <- 'reference_phonenumbers.parquet'
+      df_ref_phonenos <- read_parquet(paste0(ref_dir, ref_file_phonenos), col_types = cols(.default='c')) %>%
+        distinct(ref.phone.service, ref.phone) %>% 
+        bind_rows(df_late)
+      
+    } else {
+      
+      ref_tab <- 'reference_phonenumbers'
+      df_ref_phonenos <- googlesheets4::read_sheet(ref_sheet, ref_tab)
+      if (raw) return (df_ref_phonenos)
+      names(df_ref_phonenos) <- tolower(names(df_ref_phonenos))
+      
+      # get the variables we need
+      df_ref_phonenos <- df_ref_phonenos %>% 
+        select(ref.phone = `phone number`,
+               ref.phone.service = service,
+               date_first = `date added`,
+               date_final = `date removed`) %>% 
+        mutate(date_first = as.character(date_first)) %>% 
+        mutate(date_final = as.character(date_final)) %>% 
+        mutate(date_final = str_remove_all(date_final, ' ')) %>% 
+        mutate(date_final = case_when(is.na(date_final) ~ as.character(Sys.Date()),
+                                      date_final == '' ~ as.character(Sys.Date()),
+                                      T ~ date_final)) 
+    }
+    
+    if (df_ref_phonenos %>% count(ref.phone) %>% filter(n > 1) %>% tally() > 0) {
+      print(' ... Phone Service Duplicates !')
+      df_ref_phonenos %>% add_count(ref.phone) %>% filter(n > 1)
+      return('')
+    } 
+
+    if (google == TRUE) {
+      
+      print(' ... creating date based Phones dataset')
+      # make a record per valid date so we can do date based joins later
+      df_ref_phonenos <- df_ref_phonenos %>% 
+        mutate(date_first = as.Date(date_first)) %>% 
+        mutate(date_final = as.Date(date_final)) %>% 
+        group_by(ref.phone, ref.phone.service) %>% 
+        group_modify(~ {date_valid <- seq.Date(from = .x$date_first, to = .x$date_final, by = 1) 
+        crossing(.x[,1], date_valid)}) %>% 
+        ungroup() %>% 
+        select(ref.phone, ref.phone.service, date_valid)
+    } 
+    
+    print(' ... Phone Service data passed')
+    if (show) glimpse(df_ref_phonenos)
+    
+    return(df_ref_phonenos)
+  }
+  
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~  
+  if (what == 'queue') {
+    # late entries
+    if (google == FALSE) {
+    df_late <- tribble(~ref.queue.service, ~ref.queue, ~ref.queue.description,
+                       "Durham DRO","Q_950033_ser028", "Durham DRO (Debt Relief Orders)")
+    
+    # queue name to service mapping
+    ref_file_queue <- 'reference_queues.parquet'
+    df_ref_queue <- read_parquet(paste0(ref_dir, ref_file_queue), col_types = cols(.default='c')) %>% 
+      mutate(ref.queue.description = case_when(ref.queue.description == '#REF!' ~ '', T ~ ref.queue.description)) %>% 
+      bind_rows(df_late)
+    
+    } else {
+      ref_tab <- 'reference_queues'
+      df_ref_queue <- googlesheets4::read_sheet(ref_sheet, ref_tab)
+      if (raw) return (df_ref_queue)
+      names(df_ref_queue) <- tolower(names(df_ref_queue))
+      
+      df_ref_queue <- df_ref_queue %>% 
+        select(ref.queue = `queue`,
+               ref.queue.service = service,
+               ref.queue.description = description,
+               date_first = `date added`,
+               date_final = `date removed`) %>% 
+        mutate(date_first = as.character(date_first)) %>% 
+        mutate(date_final = as.character(date_final)) %>% 
+        mutate(date_final = str_remove_all(date_final, ' ')) %>% 
+        mutate(date_final = case_when(is.na(date_final) ~ as.character(Sys.Date()),
+                                      date_final == '' ~ as.character(Sys.Date()),
+                                      T ~ date_final))
+    }
+    
+    if (df_ref_queue %>% count(ref.queue) %>% filter(n > 1) %>% tally() > 0) {
+      print(' ... Queue Duplicates !')
+      df_ref_mbr %>% add_count(ref.queue) %>% filter(n > 1)
+      return('')
+    } 
+    
+    if (google == TRUE) {
+      d <- try(as.Date(date_first, format="%Y-%m-%d"))
+      if("try-error" %in% class(d) || is.na(d)) {
+        print("date_first invalid format")
+      }
+      
+      d <- try(as.Date(date_final, format="%Y-%m-%d"))
+      if("try-error" %in% class(d) || is.na(d)) {
+        print("date_final invalid format")
+      }
+    } 
+    
+    print(' ... Queue data passed')
+    if (show) glimpse(df_ref_queue)
+    
+    return(df_ref_queue)
+  }
   
   # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~  
   if (what == 'okta') {
@@ -677,51 +824,6 @@ fn_REF_get <- function(what, show = FALSE) {
       if (show) glimpse(df_ref_mbr)
     }
     return(df_ref_mbr)
-  }
-  
-  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~  
-  if (what == 'phonenos') {
-    # late entries
-    df_late <- tribble(~ref.phone.service, ~ref.phone,
-                       "Durham DRO","+448081897301",
-                       "Durham DRO","+448081641912",
-                       "Durham DRO","+441917504080")
-    
-    # phone nos to service mapping
-    ref_file_phonenos <- 'reference_phonenumbers.parquet'
-    df_ref_phonenos <- read_parquet(paste0(ref_dir, ref_file_phonenos), col_types = cols(.default='c')) %>%
-      distinct(ref.phone.service, ref.phone) %>% 
-      bind_rows(df_late)
-    if (df_ref_phonenos %>% count(ref.phone) %>% filter(n > 1) %>% tally() > 0) {
-      print(' ... MBR Duplicates !')
-      df_ref_phonenos %>% add_count(ref.phone) %>% filter(n > 1)
-    } else {
-      print(' ... Phone Service data passed')
-      if (show) glimpse(df_ref_phonenos)
-    }
-    return(df_ref_phonenos)
-  }
-  
-  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~  
-  if (what == 'queue') {
-    # late entries
-    df_late <- tribble(~ref.queue.service, ~ref.queue, ~ref.queue.description,
-                       "Durham DRO","Q_950033_ser028", "Durham DRO (Debt Relief Orders)")
-    
-    # queue name to service mapping
-    ref_file_queue <- 'reference_queues.parquet'
-    df_ref_queue <- read_parquet(paste0(ref_dir, ref_file_queue), col_types = cols(.default='c')) %>% 
-      mutate(ref.queue.description = case_when(ref.queue.description == '#REF!' ~ '', T ~ ref.queue.description)) %>% 
-      bind_rows(df_late)
-    
-    if (df_ref_queue %>% count(ref.queue) %>% filter(n > 1) %>% tally() > 0) {
-      print(' ... Queue Duplicates !')
-      df_ref_mbr %>% add_count(ref.queue) %>% filter(n > 1)
-    } else {
-      print(' ... Queue data passed')
-      if (show) glimpse(df_ref_queue)
-    }
-    return(df_ref_queue)
   }
   
   # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~  

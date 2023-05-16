@@ -1,4 +1,5 @@
 library(tidyverse)
+library(sqldf)
 library(arrow)
 library(here)
 
@@ -37,7 +38,7 @@ df_calls <- fn_CTR_data_collapse(df_single2, df_multiple2)
 df_transform <- fn_CALL_to_ANALYSIS(df_calls)
 
 # join reference data
-df_refs <- fn_CALL_ReferenceData(df_transform)
+df_refs <- fn_CALL_ReferenceData(df_transform, google = TRUE)
 
 # create service filters
 df_defs <- fn_CALL_dataset_defs(df_refs)
@@ -45,5 +46,6 @@ df_defs <- fn_CALL_dataset_defs(df_refs)
 # reorder variables into human-logical format
 df_analysis <- fn_reorder(df_defs)
 
+print('Finished.')
 
 # -------------------------------------------------------------------------
