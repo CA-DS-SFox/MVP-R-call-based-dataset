@@ -1,5 +1,4 @@
 library(tidyverse)
-library(sqldf)
 library(arrow)
 library(here)
 
@@ -10,8 +9,9 @@ source('R_INCLUDE_Functions.R')
 # -------------------------------------------------------------------------
 # Stage 1 - create a call based dataset from multiple CTRS
 
+t1 <- Sys.time()
 # get the source raw data
-test <- fn_CTR_data_get(month = 'march', set_info = TRUE)
+test <- fn_CTR_data_get(month = 'april', set_info = TRUE)
 
 # split into single and multiple CTR callsets
 test_list <- fn_CTR_data_split(test)
@@ -30,6 +30,8 @@ df_multiple2 <- test_list$multiple
 
 # collapse multi-CTR recordsets into a call
 df_calls <- fn_CTR_data_collapse(df_single2, df_multiple2)
+t2 <- Sys.time()
+print(paste0('CALL DATA TOOK ',t2 - t1))
 
 # -------------------------------------------------------------------------
 # Stage 2 - create a calls based dataset suitable for analysis in Tableau

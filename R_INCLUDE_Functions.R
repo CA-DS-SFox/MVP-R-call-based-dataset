@@ -107,7 +107,7 @@ fn_CTR_data_get <- function(month = 'March', reduce = TRUE, set_info = FALSE) {
       identity()
     
     rpt <- nrow(df_useful)
-      
+    
     rpt1 <- df_useful %>% 
       distinct(pipe.ctr_setid) %>% 
       tally()
@@ -132,8 +132,8 @@ fn_CTR_data_split <- function(df_in) {
     mutate(pipe.ctr_legid = 1, .after = 'pipe.ctr_orig') %>% 
     mutate(pipe.ctr_type = 'only', .after = 'pipe.ctr_legid') %>%
     mutate(pipe.call_type = initiationmethod, .after = 'pipe.ctr_type') %>% 
-    mutate(pipe.call_inout_first = paste0(initiationmethod,' : ',disconnectreason), .after = 'pipe.call_type') %>% 
-    mutate(pipe.call_inout_final = '', .after = 'pipe.call_inout_first') %>% 
+    mutate(pipe.inout_first = paste0(initiationmethod,' : ',disconnectreason), .after = 'pipe.call_type') %>% 
+    mutate(pipe.inout_final = '', .after = 'pipe.inout_first') %>% 
     mutate(pipe.ctr_junk = 0, .after = 'pipe.ctr_orig') %>% 
     mutate(pipe.ctr_junkreason = '', .after = 'pipe.ctr_junk') %>% 
     identity()
@@ -154,8 +154,8 @@ fn_CTR_data_split <- function(df_in) {
     mutate(pipe.call_type = case_when(any(pipe.ctr_legid == 1 & initiationmethod == 'INBOUND') ~ 'INBOUND',
                                       any(pipe.ctr_legid == 1 & initiationmethod == 'OUTBOUND') ~ 'OUTBOUND',
                                       T ~ 'OTHER'), .after = 'pipe.ctr_type') %>% 
-    mutate(pipe.call_inout_first = paste0(initiationmethod,' : ',disconnectreason), .after = 'pipe.call_type') %>% 
-    mutate(pipe.call_inout_final = '', .after = 'pipe.call_inout_first') %>% 
+    mutate(pipe.inout_first = paste0(initiationmethod,' : ',disconnectreason), .after = 'pipe.call_type') %>% 
+    mutate(pipe.inout_final = '', .after = 'pipe.inout_first') %>% 
     ungroup() %>% 
     mutate(pipe.ctr_junk = 0, .after = 'pipe.ctr_orig') %>% 
     mutate(pipe.ctr_junkreason = '', .after = 'pipe.ctr_junk') %>% 
@@ -204,7 +204,7 @@ fn_CTR_data_junk <- function(df_single, df_multiple, remove = TRUE) {
     mutate(pipe.ctr_junk = sum(ctr_junk)) %>% 
     mutate(pipe.ctr_junkreason = last(pipe.ctr_junkreason)) %>% 
     ungroup()
-
+  
   rpt <- df_multiple %>% filter(ctr_junk == 1) %>% tally()
   print(paste0(' ... ',rpt,' records removed'))
   
@@ -234,8 +234,8 @@ fn_CTR_data_junk <- function(df_single, df_multiple, remove = TRUE) {
                                        row_number() == n() ~ 'final',
                                        T ~ 'middle'), .after = 'pipe.ctr_legid') %>% 
       ungroup()
-  
-    }
+    
+  }
   
   # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   # remove temp variables
@@ -301,8 +301,8 @@ fn_CTR_data_collapse <- function(df_single, df_multiple) {
   print(' ... multi CTR calls : Getting inititation/disconnect from final record')
   df_exit <- df_multiple %>% 
     filter(pipe.ctr_type == 'final') %>% 
-    select(pipe.ctr_setid, exit = pipe.call_inout_first)
-
+    select(pipe.ctr_setid, exit = pipe.inout_first)
+  
   print(' ... MULTI CTR calls - OUTBOUND')
   print(' ... multi CTR calls : Outbound calls, only first record has data')
   rpt <- df_multiple %>% 
@@ -314,11 +314,11 @@ fn_CTR_data_collapse <- function(df_single, df_multiple) {
   df_outbound <- df_multiple %>% 
     filter(pipe.call_type == 'OUTBOUND') %>% 
     filter(pipe.ctr_type == 'first')
-
+  
   print(' ... multi CTR calls : Outbound calls, merge exit variable from final record')
   df_out <- df_outbound %>% 
     left_join(df_exit, by = 'pipe.ctr_setid') %>% 
-    mutate(pipe.call_inout_final = exit) %>% 
+    mutate(pipe.inout_final = exit) %>% 
     select(-exit)
   
   print(' ... multi CTR calls : Outbound calls, adding spoof variables')
@@ -331,13 +331,13 @@ fn_CTR_data_collapse <- function(df_single, df_multiple) {
   # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   # for multiple-CTR inbound calls the FINAL record is sometimes
   # DISCONNECT and sometimes QUEUE_TRANSFER these need to be handled differently
-
+  
   print(' ... MULTI CTR calls - INBOUND')
   print(' ... multi CTR calls : Inbound calls, merge exit variable from final record')
   df_inbound <- df_multiple %>% 
     filter(pipe.call_type != 'OUTBOUND') %>% 
     left_join(df_exit, by = 'pipe.ctr_setid') %>% 
-    mutate(pipe.call_inout_final = exit) %>% 
+    mutate(pipe.inout_final = exit) %>% 
     select(-exit)
   
   print(' ... multi CTR calls : Inbound calls, remove final record if it is inititationmethod = DISCONNECT')
@@ -372,7 +372,7 @@ fn_CTR_data_collapse <- function(df_single, df_multiple) {
     mutate(pipe.queue.duration = paste(queue.duration, collapse = ', ')) %>% 
     mutate(pipe.queue.total = sum(as.integer(queue.duration))) %>% 
     ungroup() 
-
+  
   print(' ... multi CTR calls : Inbound calls, create single call record from first and final records')
   # then get info from first ctr, and add the exit variable
   df_first <- df_inbound %>% 
@@ -380,7 +380,7 @@ fn_CTR_data_collapse <- function(df_single, df_multiple) {
     select(pipe.ctr_setid:customerendpoint.address) %>% 
     mutate(pipe.ctr_type = 'multiple') %>%
     identity()
-
+  
   df_final <- df_inbound %>% 
     filter(pipe.ctr_type == 'final') %>% 
     select(pipe.ctr_setid, transferredtoendpoint.address:last_col()) %>% 
@@ -393,7 +393,7 @@ fn_CTR_data_collapse <- function(df_single, df_multiple) {
   # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   print(' ... combining single CTR and multi CTR output into call based dataset')
   df_calls <- df_single %>% bind_rows(df_out) %>% bind_rows(df_in)
-
+  
   rpt <- df_calls %>% 
     distinct(pipe.ctr_setid) %>% 
     tally()
@@ -449,41 +449,60 @@ fn_CALL_to_ANALYSIS <- function(df_calls_input) {
     mutate(pipe.tm_disc = substr(disconnecttimestamp, 12, 19)) %>%
     mutate(pipe.tm_updat = substr(lastupdatetimestamp, 12, 19)) %>%
     
-    # duration in each state
-    # mutate(dur_init_conn = as.integer(difftime(connectedtosystemtimestamp, initiationtimestamp, unit = 'secs'))) %>%
-    # mutate(dur_init_que = as.integer(difftime(queue.enqueuetimestamp, initiationtimestamp, unit = 'secs'))) %>%
-    # mutate(dur_enq_deq = as.integer(difftime(queue.dequeuetimestamp, queue.enqueuetimestamp, unit = 'secs'))) %>%
-    # mutate(dur_deq_agnt = as.integer(difftime(agent.connectedtoagenttimestamp, queue.dequeuetimestamp, unit = 'secs'))) %>%
-    # # time to answer
-    # mutate(dur_conn = as.integer(difftime(agent.connectedtoagenttimestamp, queue.dequeuetimestamp, unit = 'secs'))) %>%
-    # # total customer in-call time
-    # mutate(dur_call = as.integer(difftime(agent.aftercontactworkstarttimestamp, agent.connectedtoagenttimestamp, unit = 'secs'))) %>%
-    # # interaction time from connect
-  # mutate(dur_call_interact = as.integer(agent.agentinteractionduration)) %>%
-  # # hold time
-  # mutate(dur_call_hold = as.integer(agent.customerholdduration)) %>%
-  # # mutate(dur_aft = as.integer(difftime(agent.aftercontactworkendtimestamp, agent.aftercontactworkstarttimestamp, unit = 'secs'))) %>%
-  # mutate(dur_aft = as.integer(agent.aftercontactworkduration)) %>%
-  # mutate(dur_dis_upd = as.integer(difftime(lastupdatetimestamp, disconnecttimestamp, unit = 'secs'))) %>%
-  # mutate(dur_total = as.integer(difftime(lastupdatetimestamp, initiationtimestamp, unit = 'secs'))) %>%
-  
-  # flags
-  mutate(pipe.flag_weekday = case_when(pipe.when_day %in% c('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday') ~ 1, T ~ 0)) %>%
+    # time
+    mutate(tm_init = as.POSIXct(pipe.when_time, tz = '', format = '%H:%M:%S')) %>% 
+    mutate(tm_disc = as.POSIXct(pipe.tm_disc, tz = '', format = '%H:%M:%S')) %>% 
+    mutate(pipe.time.total = as.integer(difftime(tm_disc, tm_init, units = 'secs'))) %>% 
+    
+    mutate(agent.agentinteractionduration = coalesce(as.integer(agent.agentinteractionduration),0)) %>% 
+    mutate(agent.aftercontactworkduration = coalesce(as.integer(agent.aftercontactworkduration),0)) %>% 
+    mutate(agent.customerholdduration = coalesce(as.integer(agent.customerholdduration),0)) %>% 
+    mutate(pipe.talk.total = agent.agentinteractionduration + agent.aftercontactworkduration + agent.customerholdduration) %>% 
+    
+    # flags
+    mutate(pipe.flag_weekday = case_when(pipe.when_day %in% c('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday') ~ 1, T ~ 0)) %>%
+    
     mutate(pipe.flag_queued = case_when(!is.na(pipe.tm_quenq) ~ 1, T ~ 0)) %>%
     mutate(pipe.flag_queuednot = case_when(pipe.flag_queued == 1 ~0, T ~ 1)) %>%
     mutate(pipe.flag_answer = case_when(!is.na(pipe.tm_agcon) ~ 1, T ~ 0)) %>%
+    
+    mutate(pipe.flag_queued_abandoned10 = case_when(pipe.flag_queued == 1 & pipe.flag_answer == 0 & pipe.queue.total < 11 ~ 1, T ~ 0)) %>% 
+    mutate(pipe.flag_queued_abandoned = case_when(pipe.flag_queued == 1 & pipe.flag_answer == 0 ~ 1, T ~ 0)) %>% 
+    
     mutate(pipe.flag_inbound = case_when(initiationmethod == 'INBOUND' ~ 1, T ~ 0)) %>%
     mutate(pipe.flag_outbound = case_when(initiationmethod == 'OUTBOUND' ~ 1, T ~ 0)) %>%
     mutate(pipe.flag_other = case_when(!initiationmethod %in% c('INBOUND','OUTBOUND') ~ 1, T ~ 0)) %>%
-    mutate(pipe.flag_answerin20 = case_when(pipe.flag_answer == 1 & (queue.duration < 21) ~ 1, T ~ 0)) %>%
+    mutate(pipe.flag_answerin20 = case_when(pipe.flag_answer == 1 & (pipe.queue.duration < 21) ~ 1, T ~ 0)) %>%
+    mutate(pipe.flag_answerin30 = case_when(pipe.flag_answer == 1 & (pipe.queue.duration < 31) ~ 1, T ~ 0)) %>%
+    mutate(pipe.flag_answerin60 = case_when(pipe.flag_answer == 1 & (pipe.queue.duration < 61) ~ 1, T ~ 0)) %>%
     mutate(pipe.flag_calllonger30 = case_when(agent.agentinteractionduration > 30 ~ 1, T ~ 0)) %>%
+    mutate(pipe.flag_talk_abandoned5 = case_when(pipe.flag_answer == 1 & pipe.talk.total < 6 ~ 1, T ~ 0)) %>% 
     
-    # fix text
+    
+    # fix survey text
     mutate(attributes.question1 = fn_STRING_fixes(attributes.question1)) %>% 
     mutate(attributes.question2 = fn_STRING_fixes(attributes.question2)) %>% 
     mutate(attributes.question3 = fn_STRING_fixes(attributes.question3)) %>% 
     mutate(attributes.question4 = fn_STRING_fixes(attributes.question4)) %>% 
     mutate(attributes.question5 = fn_STRING_fixes(attributes.question5)) %>% 
+    
+    # survey
+    mutate(q1 = case_when(is.na(attributes.question1response) ~ 0,
+                          attributes.question1response %in% resp ~ 1,
+                          T ~ 0)) %>% 
+    mutate(q2 = case_when(is.na(attributes.question2response) ~ 0,
+                          attributes.question2response %in% resp ~ 1,
+                          T ~ 0)) %>% 
+    mutate(q3 = case_when(is.na(attributes.question3response) ~ 0,
+                          attributes.question3response %in% resp ~ 1,
+                          T ~ 0)) %>% 
+    mutate(q4 = case_when(is.na(attributes.question4response) ~ 0,
+                          attributes.question4response %in% resp ~ 1,
+                          T ~ 0)) %>% 
+    mutate(q5 = case_when(is.na(attributes.question5response) ~ 0,
+                          attributes.question5response %in% resp ~ 1,
+                          T ~ 0)) %>% 
+    mutate(pipe.flag_survey = case_when(q1+q2+q3+q4+q5 > 0 ~ 1, T ~ 0)) %>% 
     
     identity()  
   
@@ -495,46 +514,41 @@ fn_CALL_ReferenceData <- function(df_input, google = TRUE) {
   # source('R_INCLUDE_References.R')
   
   print(' ... Joining reference data')
+  print(' ... This needs updating to add a date clause in the join')
   
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   df_ref_okta <- fn_REF_get('okta')
   df_output <- df_input %>% 
     left_join(df_ref_okta, by = c('agent.username' = 'okta_id'))
   
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   df_ref_mbr <- fn_REF_get('mbr')
   df_output <- df_output %>% 
     left_join(df_ref_mbr %>% select(member_aws, ref.lss.fullname, ref.lss.shortname), by = c('attributes.formember' = 'member_aws')) 
   
-  if (google == TRUE) {
-    print(' ... getting google data and creating date range')
-    # date range based join
-    df_ref_phonenos <- fn_REF_get('phonenos', google = TRUE)
-    
-    df_output <- df_output %>% 
-      left_join(df_ref_phonenos, by = c('systemendpoint.address' = 'ref.phone', 'pipe.when_date' = 'date_valid'))
-    
-    df_output <- df_output %>% 
-      left_join(df_ref_phonenos %>% select(ref.transferno = ref.phone, ref.transfer.service = ref.phone.service, date_valid), 
-                by = c('transferredtoendpoint.address' = 'ref.transferno', 'pipe.when_date' = 'date_valid'))
-  } else {
-    df_ref_phonenos <- fn_REF_get('phonenos')
-    df_output <- df_output %>% 
-      left_join(df_ref_phonenos, by = c('systemendpoint.address' = 'ref.phone')) %>% 
-      left_join(df_ref_phonenos %>% select(ref.transferno = ref.phone, ref.transfer.service = ref.phone.service), by = c('transferredtoendpoint.address' = 'ref.transferno'))
-  }
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  df_ref_phonenos <- fn_REF_get('phonenos')
+  df_output <- df_output %>% 
+    left_join(df_ref_phonenos, by = c('systemendpoint.address' = 'ref.phone')) %>% 
+    left_join(df_ref_phonenos %>% select(ref.transferno = ref.phone, ref.transfer.service = ref.phone.service), by = c('transferredtoendpoint.address' = 'ref.transferno'))
   
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   df_ref_queue <- fn_REF_get('queue')
   df_output <- df_output %>% 
     left_join(df_ref_queue %>% select(ref.queue, ref.queue.service, ref.queue.description), by = c('queue.name' = 'ref.queue'))
   
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   df_ref_algroups <- fn_REF_get('algroup')
   df_output <- df_output %>% 
     left_join(df_ref_algroups %>% select(member_aws, ref.formember.advicegroup = member_group), by = c('attributes.formember' = 'member_aws')) %>% 
     left_join(df_ref_algroups %>% select(member_aws, ref.okta.advicegroup = member_group), by = c('ref.okta.member' = 'member_aws')) 
   
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   df_ref_single <- fn_REF_get('single')
   df_output <- df_output %>% 
     left_join(df_ref_single %>% select(single_queue, ref.single_group = single_group), by = c('queue.name' = 'single_queue')) 
   
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   df_ref_alink <- fn_REF_get('alink')
   df_output <- df_output %>% 
     left_join(df_ref_alink, by = c('systemendpoint.address' = 'ref.alink.phone'))
@@ -583,14 +597,14 @@ fn_reorder <- function(df_input) {
   
   col_order <- c("pipe.ctr_setid","pipe.call_type",
                  "pipe.ctr_orig", "pipe.ctr_junk","pipe.ctr_type",
-                 "pipe.call_inout_first","pipe.call_inout_final",                 
+                 "pipe.inout_first","pipe.inout_final",                 
                  "initiationmethod","disconnectreason",
                  "systemendpoint.address","ref.phone.service","ref.alink.service",
                  "customerendpoint.address",
                  "transferredtoendpoint.address", "ref.transfer.service",
                  "queue.name","ref.queue.service","ref.queue.description", 
                  "queue.duration",
-                 "pipe.queue.hops", "pipe.queue.duration", "pipe.queue.total", 
+                 "pipe.queue.hops", "pipe.queue.duration", "pipe.queue.total", "pipe.talk.total", "pipe.time.total",
                  "attributes.nationalreason",
                  "attributes.keypress",
                  "agent.username","ref.okta.advisername","ref.okta.member","ref.okta.office","ref.okta.advicegroup",
@@ -602,7 +616,14 @@ fn_reorder <- function(df_input) {
                  "agent.hierarchygroups.level5.groupname",
                  
                  "pipe.when_date","pipe.when_week","pipe.when_day","pipe.when_month","pipe.when_time","pipe.when_hour","pipe.when_minute","pipe.when_second",
-                 "pipe.flag_weekday","pipe.flag_queued","pipe.flag_queuednot","pipe.flag_answer","pipe.flag_inbound","pipe.flag_outbound","pipe.flag_other","pipe.flag_answerin20","pipe.flag_calllonger30",
+                 "pipe.flag_weekday",
+                 "pipe.flag_queued","pipe.flag_queuednot","pipe.flag_answer",
+                 "pipe.flag_inbound","pipe.flag_outbound","pipe.flag_other",
+                 "pipe.flag_answerin20", "pipe.flag_answerin30", "pipe.flag_answerin60",
+                 "pipe.flag_calllonger30",
+                 "pipe.flag_queued_abandoned","pipe.flag_queued_abandoned10",
+                 "pipe.flag_talk_abandoned5",
+                 "pipe.flag_survey",
                  
                  "agent.customerholdduration","agent.longestholdduration","agent.agentinteractionduration","agent.aftercontactworkduration",
                  "agent.numberofholds",
@@ -649,8 +670,15 @@ fn_reorder <- function(df_input) {
                  "pipe.dataset_wit",
                  "pipe.dataset_fix")
   
-  df_output <- df_input %>% 
-    select(all_of(col_order))
+  missing <- df_input %>% colnames() %>% setdiff(col_order, .)
+  
+  if (length(missing) > 0) {
+    print(paste0(' ... Variables not in dataframe are ', paste0(missing, collapse = ', ')))
+    return('')
+  } else {
+    df_output <- df_input %>% select(all_of(col_order))
+    return(df_output)
+  }
 }
 
 # RETURN reference datasets
@@ -708,7 +736,7 @@ fn_REF_get <- function(what, show = FALSE, google = FALSE, raw = FALSE) {
       df_ref_phonenos %>% add_count(ref.phone) %>% filter(n > 1)
       return('')
     } 
-
+    
     if (google == TRUE) {
       
       print(' ... creating date based Phones dataset')
@@ -733,15 +761,15 @@ fn_REF_get <- function(what, show = FALSE, google = FALSE, raw = FALSE) {
   if (what == 'queue') {
     # late entries
     if (google == FALSE) {
-    df_late <- tribble(~ref.queue.service, ~ref.queue, ~ref.queue.description,
-                       "Durham DRO","Q_950033_ser028", "Durham DRO (Debt Relief Orders)")
-    
-    # queue name to service mapping
-    ref_file_queue <- 'reference_queues.parquet'
-    df_ref_queue <- read_parquet(paste0(ref_dir, ref_file_queue), col_types = cols(.default='c')) %>% 
-      mutate(ref.queue.description = case_when(ref.queue.description == '#REF!' ~ '', T ~ ref.queue.description)) %>% 
-      bind_rows(df_late)
-    
+      df_late <- tribble(~ref.queue.service, ~ref.queue, ~ref.queue.description,
+                         "Durham DRO","Q_950033_ser028", "Durham DRO (Debt Relief Orders)")
+      
+      # queue name to service mapping
+      ref_file_queue <- 'reference_queues.parquet'
+      df_ref_queue <- read_parquet(paste0(ref_dir, ref_file_queue), col_types = cols(.default='c')) %>% 
+        mutate(ref.queue.description = case_when(ref.queue.description == '#REF!' ~ '', T ~ ref.queue.description)) %>% 
+        bind_rows(df_late)
+      
     } else {
       ref_tab <- 'reference_queues'
       df_ref_queue <- googlesheets4::read_sheet(ref_sheet, ref_tab)
@@ -766,18 +794,6 @@ fn_REF_get <- function(what, show = FALSE, google = FALSE, raw = FALSE) {
       print(' ... Queue Duplicates !')
       df_ref_mbr %>% add_count(ref.queue) %>% filter(n > 1)
       return('')
-    } 
-    
-    if (google == TRUE) {
-      d <- try(as.Date(date_first, format="%Y-%m-%d"))
-      if("try-error" %in% class(d) || is.na(d)) {
-        print("date_first invalid format")
-      }
-      
-      d <- try(as.Date(date_final, format="%Y-%m-%d"))
-      if("try-error" %in% class(d) || is.na(d)) {
-        print("date_final invalid format")
-      }
     } 
     
     print(' ... Queue data passed')
