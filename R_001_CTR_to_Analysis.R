@@ -11,7 +11,8 @@ source('R_INCLUDE_Functions.R')
 
 t1 <- Sys.time()
 # get the source raw data
-test <- fn_CTR_data_get(month = 'april', set_info = TRUE)
+month_to_process <- 'april'
+test <- fn_CTR_data_get(month = month_to_process, set_info = TRUE)
 
 # split into single and multiple CTR callsets
 test_list <- fn_CTR_data_split(test)
@@ -31,7 +32,7 @@ df_multiple2 <- test_list$multiple
 # collapse multi-CTR recordsets into a call
 df_calls <- fn_CTR_data_collapse(df_single2, df_multiple2)
 t2 <- Sys.time()
-print(paste0('CALL DATA TOOK ',t2 - t1))
+print(paste0('CALL DATA TOOK ',t2 - t1, ' ',nrow(df_calls),' calls in total'))
 
 # -------------------------------------------------------------------------
 # Stage 2 - create a calls based dataset suitable for analysis in Tableau
@@ -47,6 +48,9 @@ df_defs <- fn_CALL_dataset_defs(df_refs)
 
 # reorder variables into human-logical format
 df_analysis <- fn_reorder(df_defs)
+
+# outfile <- paste0('CALLS-ANALYSIS-',month_to_process,'_',Sys.Date(),'.csv')
+# write_csv(df_analysis, here('data',outfile))
 
 print('Finished.')
 

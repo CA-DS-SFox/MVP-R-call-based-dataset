@@ -102,6 +102,7 @@ fn_CTR_data_get <- function(month = 'March', reduce = TRUE, set_info = FALSE) {
       # make a ctr_setid, and count the number of ctrs in the call
       mutate(pipe.ctr_setid = case_when(is.na(initialcontactid) ~ contactid, T ~ initialcontactid), .before = 1) %>% 
       group_by(pipe.ctr_setid) %>% 
+      arrange(pipe.ctr_setid, initiationtimestamp) %>% 
       mutate(pipe.ctr_orig = n(), .after = 'pipe.ctr_setid') %>% 
       ungroup() %>% 
       identity()
@@ -287,7 +288,7 @@ fn_CTR_data_transfers <- function(df_single, df_multiple) {
 fn_CTR_data_collapse <- function(df_single, df_multiple) {
   
   # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  print(' ... SINGLE CTR calls')
+  print('SINGLE CTR calls')
   print(' ... single CTR calls : Adding spoof variables')
   df_single <- df_single %>% 
     mutate(pipe.queue.hops = queue.name) %>% 
@@ -297,13 +298,13 @@ fn_CTR_data_collapse <- function(df_single, df_multiple) {
   # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   # for multiple-CTR outbound calls the FINAL record is always
   # a TRANSFER record, but the rest of the variables are NA
-  print(' ... MULTI CTR calls')
+  print('MULTI CTR calls')
   print(' ... multi CTR calls : Getting inititation/disconnect from final record')
   df_exit <- df_multiple %>% 
     filter(pipe.ctr_type == 'final') %>% 
     select(pipe.ctr_setid, exit = pipe.inout_first)
   
-  print(' ... MULTI CTR calls - OUTBOUND')
+  print(' . MULTI CTR calls - OUTBOUND')
   print(' ... multi CTR calls : Outbound calls, only first record has data')
   rpt <- df_multiple %>% 
     filter(pipe.call_type == 'OUTBOUND') %>% 
@@ -332,7 +333,7 @@ fn_CTR_data_collapse <- function(df_single, df_multiple) {
   # for multiple-CTR inbound calls the FINAL record is sometimes
   # DISCONNECT and sometimes QUEUE_TRANSFER these need to be handled differently
   
-  print(' ... MULTI CTR calls - INBOUND')
+  print(' . MULTI CTR calls - INBOUND')
   print(' ... multi CTR calls : Inbound calls, merge exit variable from final record')
   df_inbound <- df_multiple %>% 
     filter(pipe.call_type != 'OUTBOUND') %>% 
@@ -340,17 +341,18 @@ fn_CTR_data_collapse <- function(df_single, df_multiple) {
     mutate(pipe.inout_final = exit) %>% 
     select(-exit)
   
-  print(' ... multi CTR calls : Inbound calls, remove final record if it is inititationmethod = DISCONNECT')
+  callcount <- df_inbound %>% distinct(pipe.ctr_setid) %>% tally()
+  print(paste0(' ... multi CTR calls : ',callcount,' Inbound calls, remove final record if it is inititationmethod = DISCONNECT'))
+  
   rpt <- df_inbound %>% 
     filter(initiationmethod == 'DISCONNECT') %>% 
     tally()
   print(paste0(' ... loosing ', rpt,' non-informative inbound records'))
-  
-  print(' ... multi CTR calls : Inbound calls, reorganising after record removal')
+
   # now we need to throw away the final DISCONNECT records because there is no info on them
   # they are different to when a final record which is QUEUE_TRANSFER and is informative
   df_inbound <- df_inbound %>% 
-    filter(!initiationmethod == 'DISCONNECT') %>% 
+    filter(initiationmethod != 'DISCONNECT') %>% 
     group_by(pipe.ctr_setid) %>% 
     mutate(pipe.ctr_type = case_when(n() == 1 ~ 'only',
                                      row_number() == 1 ~ 'first',
@@ -358,8 +360,10 @@ fn_CTR_data_collapse <- function(df_single, df_multiple) {
                                      T ~ 'middle'), .after = 'pipe.ctr_legid') %>% 
     ungroup()
   
+  callcount <- df_inbound %>% distinct(pipe.ctr_setid) %>% tally()
+  print(paste0(' ... multi CTR calls : ',callcount,' Inbound calls after DISCONNECT record removal'))
+  
   rpt <- df_inbound %>% 
-    filter(pipe.ctr_type != 'only') %>% 
     distinct(pipe.ctr_setid) %>% 
     tally()
   print(paste0(' ... multi CTR calls : Inbound calls FINAL CLEAN COUNT ', rpt,' calls' ))
@@ -376,9 +380,10 @@ fn_CTR_data_collapse <- function(df_single, df_multiple) {
   print(' ... multi CTR calls : Inbound calls, create single call record from first and final records')
   # then get info from first ctr, and add the exit variable
   df_first <- df_inbound %>% 
-    filter(pipe.ctr_type == 'first') %>% 
+    filter(pipe.ctr_type %in% c('first','only')) %>% 
     select(pipe.ctr_setid:customerendpoint.address) %>% 
-    mutate(pipe.ctr_type = 'multiple') %>%
+    mutate(pipe.ctr_type = case_when(pipe.ctr_type == 'first' ~ 'multiple',
+                                     T ~ 'only')) %>%
     identity()
   
   df_final <- df_inbound %>% 
@@ -488,19 +493,19 @@ fn_CALL_to_ANALYSIS <- function(df_calls_input) {
     
     # survey
     mutate(q1 = case_when(is.na(attributes.question1response) ~ 0,
-                          attributes.question1response %in% resp ~ 1,
+                          attributes.question1response %in% c('1','2','3','4','5') ~ 1,
                           T ~ 0)) %>% 
     mutate(q2 = case_when(is.na(attributes.question2response) ~ 0,
-                          attributes.question2response %in% resp ~ 1,
+                          attributes.question2response %in% c('1','2','3','4','5') ~ 1,
                           T ~ 0)) %>% 
     mutate(q3 = case_when(is.na(attributes.question3response) ~ 0,
-                          attributes.question3response %in% resp ~ 1,
+                          attributes.question3response %in% c('1','2','3','4','5') ~ 1,
                           T ~ 0)) %>% 
     mutate(q4 = case_when(is.na(attributes.question4response) ~ 0,
-                          attributes.question4response %in% resp ~ 1,
+                          attributes.question4response %in% c('1','2','3','4','5') ~ 1,
                           T ~ 0)) %>% 
     mutate(q5 = case_when(is.na(attributes.question5response) ~ 0,
-                          attributes.question5response %in% resp ~ 1,
+                          attributes.question5response %in% c('1','2','3','4','5') ~ 1,
                           T ~ 0)) %>% 
     mutate(pipe.flag_survey = case_when(q1+q2+q3+q4+q5 > 0 ~ 1, T ~ 0)) %>% 
     
@@ -597,8 +602,7 @@ fn_reorder <- function(df_input) {
   
   col_order <- c("pipe.ctr_setid","pipe.call_type",
                  "pipe.ctr_orig", "pipe.ctr_junk","pipe.ctr_type",
-                 "pipe.inout_first","pipe.inout_final",                 
-                 "initiationmethod","disconnectreason",
+                 "pipe.inout_first","pipe.inout_final",
                  "systemendpoint.address","ref.phone.service","ref.alink.service",
                  "customerendpoint.address",
                  "transferredtoendpoint.address", "ref.transfer.service",
