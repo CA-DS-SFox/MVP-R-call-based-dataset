@@ -113,11 +113,250 @@ fn_CTR_data_get <- function(month = 'March', reduce = TRUE, set_info = FALSE) {
       distinct(pipe.ctr_setid) %>% 
       tally()
     
-    print(paste0(' ... ',rpt,' records for ',rpt1,' calls'))
+    rpt.calls <- df_useful %>% distinct(pipe.ctr_setid) %>% tally()
+    print(paste0(' ... RAW : records=',nrow(df_useful),' calls=',rpt.calls))
+    
   }
   
   return(df_useful)
 }
+
+# add some useful variables, most will be empty for now and populated later
+# input dataframe is all CTRs
+fn_CTR_add_variables <- function(df_in) {
+  
+  df_out <- df_in %>% 
+    arrange(pipe.ctr_setid, initiationtimestamp) %>%
+    mutate(dup_check = paste0(initiationmethod,':',initiationtimestamp,':',disconnectreason,':',disconnecttimestamp), .after = 'pipe.ctr_setid') %>% 
+    mutate(dup_bad = FALSE, .after = 'dup_check') %>% 
+    mutate(dup_set = FALSE, .after = 'dup_bad') %>% 
+    mutate(pipe.queue.hops = '', .after = 'queue.name') %>% 
+    mutate(pipe.queue.duration = '', .after = 'pipe.queue.hops') %>% 
+    mutate(pipe.queue.total = '', .after = 'pipe.queue.duration') %>% 
+    mutate(pipe.inout_first = '', .after = 'pipe.ctr_orig') %>% 
+    mutate(pipe.inout_final = '', .after = 'pipe.inout_first') %>% 
+    group_by(pipe.ctr_setid) %>%
+    mutate(pipe.call_type = case_when(row_number() == 1 ~ initiationmethod), .after = 'dup_set') %>% 
+    tidyr::fill(pipe.call_type) %>% 
+    ungroup() %>%
+    identity()
+  
+  return(df_out)
+}
+
+# remove any call types not inbound or outbound
+# input dataframe is all CTRs
+fn_CTR_remove_badtypes <- function(df_in) {
+  
+  df_out <- df_in %>% filter(pipe.call_type %in% c('INBOUND', 'OUTBOUND'))
+  
+  rpt.dropped <- nrow(df_in) - nrow(df_out)
+  rpt.calls <- df_out %>% distinct(pipe.ctr_setid) %>% tally()
+  print(paste0(' ... INOUT only : dropped ',rpt.dropped,' records.'))
+  print(paste0(' ... INOUT only : records=',nrow(df_out),' calls=',rpt.calls))
+  return(df_out)  
+}
+
+# remove any duplicates, based on the dup_check variable
+# there's usually 750-800 each month
+# input dataframe is all CTRs with bad types removed
+fn_CTR_remove_deduplicates <- function(df_in) {
+  
+  df_out <- df_in %>% 
+    group_by(pipe.ctr_setid) %>% 
+    mutate(dup_bad = case_when(dup_check == lag(dup_check) ~ TRUE, T ~ dup_bad)) %>% 
+    mutate(dup_set = any(dup_bad)) %>% 
+    ungroup() %>% 
+    filter(dup_bad == FALSE) %>% 
+    identity()
+
+  rpt.dropped <- nrow(df_in) - nrow(df_out)
+  rpt.calls <- df_out %>% distinct(pipe.ctr_setid) %>% tally()
+  print(paste0(' ... DEDUPLICATE : dropped ',rpt.dropped,' records.'))
+  print(paste0(' ... DEDUPLICATE : records=',nrow(df_out),' calls=',rpt.calls))
+  
+  return(df_out)  
+  
+}
+
+# split into Inbound and Outbound datasets, and determine CTR order
+# input dataframe is all clean CTRs
+fn_CTR_split <- function(df_in) {
+  
+  # identify ctr order
+  df_ctrs <- df_in %>% 
+    group_by(pipe.ctr_setid) %>% 
+    mutate(pipe.ctr_type = case_when(n() == 1 ~ 'only',
+                                     row_number() == 1 ~ 'first',
+                                     row_number() == n() ~ 'final',
+                                     T ~ 'middle'), .after = 'pipe.call_type') %>% 
+    ungroup()
+  
+  # SPLIT INTO INBOUND & OUTBOUND
+  df_outbound <- df_ctrs %>% filter(pipe.call_type == 'OUTBOUND')
+  rpt.out <- df_outbound %>% distinct(pipe.ctr_setid) %>% tally()
+  print(paste0(' ... OUTBOUND : records=',nrow(df_outbound),' calls=',rpt.out))
+  
+  df_inbound <- df_ctrs %>% filter(pipe.call_type == 'INBOUND')
+  rpt.in <- df_inbound %>% distinct(pipe.ctr_setid) %>% tally()
+  print(paste0(' ... INBOUND : records=',nrow(df_inbound),' calls=',rpt.in))
+  
+  print(paste0(' ... TOTAL : records=',nrow(df_outbound) + nrow(df_inbound),' calls=',rpt.out + rpt.in))
+  
+  return_list <- list(df_ctrs = df_ctrs,
+                      df_outbound = df_outbound,
+                      df_inbound = df_inbound)
+  
+  return(return_list)
+}
+
+# collapse outbound CTRs to calls
+# input dataframe is outbound CTRS
+fn_CALLS_outbound <- function(df_in) {
+
+  # the only data we want from the final CTR is the exit method
+  df_exit <- df_in %>% 
+    filter(pipe.ctr_type == 'final') %>% 
+    mutate(exit = paste0(initiationmethod,' : ',disconnectreason)) %>% 
+    select(pipe.ctr_setid, exit)
+
+  # outbound calls only have 1 informative CTR which is the first in the set
+  # often there's a second record with initiationmethod = TRANSFER
+  # but it's an artefact of the system and has no information
+  df_out <- df_in %>% 
+    filter(pipe.ctr_type %in% c('first', 'only')) %>% 
+    mutate(pipe.ctr_type = 'only') %>% 
+    mutate(pipe.inout_first = paste0(initiationmethod,' : ',disconnectreason)) %>% 
+    left_join(df_exit, by = 'pipe.ctr_setid') %>% 
+    mutate(pipe.inout_final = exit) %>% 
+    select(-exit)
+  
+  rpt.out <- df_out %>% distinct(pipe.ctr_setid) %>% tally()
+  print(paste0(' ... OUTBOUND : records=',nrow(df_out),' calls=',rpt.out))
+  
+  return(df_out)
+  
+}
+
+# collapse inbound CTRs to calls
+# input dataframe is inbound CTRS
+fn_CALLS_inbound <- function(df_in) {
+  
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # first process any valid transfers, they need to be recorded
+  # as unique calls so make the pipe.ctr_setid unique
+  # and reorder the dataset
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  rpt.transfer <- df_in %>% 
+    filter(initiationmethod == 'TRANSFER') %>% 
+    tally()
+  
+  if (rpt.transfer > 0) {
+    print(paste0(' ... TRANSFER records found, total ',rpt.transfer))
+    print(' ... Moving to a new call set')
+    
+    set.transfer <- df_in %>% 
+      filter(initiationmethod == 'TRANSFER') %>% 
+      select(pipe.ctr_setid) %>% 
+      pull()
+    
+    # make transfers a new call and re-sort them
+    df_transfer <- df_in %>% 
+      filter(pipe.ctr_setid %in% set.transfer) %>% 
+      mutate(pipe.ctr_setid = case_when(initiationmethod == 'TRANSFER' ~ contactid, T ~ pipe.ctr_setid)) %>% 
+      arrange(pipe.ctr_setid, initiationtimestamp) %>% 
+      group_by(pipe.ctr_setid) %>% 
+      mutate(pipe.ctr_type = case_when(n() == 1 ~ 'only',
+                                       row_number() == 1 ~ 'first',
+                                       row_number() == n() ~ 'final',
+                                       T ~ 'middle'), .after = 'pipe.call_type') %>% 
+      ungroup() %>% 
+      mutate(pipe.call_type = case_when(initiationmethod == 'TRANSFER' ~ 'TRANSFER', T ~ pipe.call_type)) %>% 
+      identity()
+
+    # keep the regular records and replace the transfer calls
+    df_in <- df_in %>% 
+      filter(!pipe.ctr_setid %in% set.transfer) %>% 
+      bind_rows(df_transfer)
+    
+  } else {
+    print(paste0(' ... NO INBOUND TRANSFER records found'))
+  }
+
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # save the exit reason from the final cTR
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  
+  # save the disconnect reason
+  df_exit <- df_in %>% 
+    filter(pipe.ctr_type == 'final') %>% 
+    mutate(exit = paste0(initiationmethod,' : ',disconnectreason)) %>% 
+    select(pipe.ctr_setid, exit) %>% 
+    identity()
+  
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # Often the final CTR is a initiationmethod = DISCONNECT, the
+  # only useful information is the exit reason which we have
+  # saved above, so remove these records now, only keep useful CTRs
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  print(' ... Dropping DISCONNECT records')
+  df_useful <- df_in %>% 
+    filter(initiationmethod != 'DISCONNECT') %>% 
+    group_by(pipe.ctr_setid) %>% 
+    mutate(pipe.ctr_type = case_when(n() == 1 ~ 'only',
+                                     row_number() == 1 ~ 'first',
+                                     row_number() == n() ~ 'final',
+                                     T ~ 'middle'), .after = 'pipe.call_type') %>% 
+    ungroup() %>% 
+    identity()
+  
+    
+  rpt.dropped <- nrow(df_in) - nrow(df_useful)
+  print(paste0(' ... Dropping ', rpt.dropped ,' inbound disconnect records'))
+  
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # collapse queue info from across all the CTRs
+  print(' ... getting data from across all CTRs')
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  df_out <- df_useful %>% 
+    group_by(pipe.ctr_setid) %>% 
+    mutate(pipe.queue.hops = paste(queue.name, collapse = ', ')) %>% 
+    mutate(pipe.queue.duration = paste(queue.duration, collapse = ', ')) %>% 
+    mutate(pipe.queue.total = as.character(sum(as.integer(queue.duration)))) %>% 
+    ungroup() %>% 
+    mutate(pipe.inout_first = case_when(pipe.ctr_type %in% c('first','only') ~ paste0(initiationmethod,' : ',disconnectreason))) %>% 
+    left_join(df_exit, by = 'pipe.ctr_setid') %>% 
+    mutate(pipe.inout_final = exit) %>% 
+    select(-exit) %>% 
+    identity()
+
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # collapse all the info from across the CTRs
+  print(' ... Creating call records')
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  
+  # we want some information from the first CTR, and some from the final one
+  # so split into component ctr types 
+  df_inbound_only <- df_out %>% filter(pipe.ctr_type == 'only')  
+  df_inbound_first <- df_out %>% filter(pipe.ctr_type == 'first') %>% mutate(pipe.ctr_type = 'multiple')
+  df_inbound_final <- df_out %>% filter(pipe.ctr_type == 'final')
+
+  # get the variables from the correct CTR
+  a1 <- df_inbound_first %>% select(pipe.ctr_setid:queue.enqueuetimestamp)
+  a2 <- df_inbound_final %>% select(pipe.ctr_setid, queue.dequeuetimestamp:last_col())
+  a3 <- a1 %>% left_join(a2, by='pipe.ctr_setid')
+  
+  # join to give a calls based dataset
+  df_out <- df_inbound_only %>% bind_rows(a3)
+  
+  rpt.out <- df_out %>% distinct(pipe.ctr_setid) %>% tally()
+  rpt.mult <- df_out %>% filter(pipe.ctr_type == 'multiple') %>% tally()
+  print(paste0(' ... INBOUND : records=',nrow(df_out),' calls=',rpt.out, ' multi-CTRs ',rpt.mult))
+  
+  return(df_out) 
+}
+
+# -------------------------------------------------------------------------
 
 # split into single ctr and multi ctr datasets
 fn_CTR_data_split <- function(df_in) {
@@ -304,6 +543,8 @@ fn_CTR_data_collapse <- function(df_single, df_multiple) {
     filter(pipe.ctr_type == 'final') %>% 
     select(pipe.ctr_setid, exit = pipe.inout_first)
   
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # process outbound calls
   print(' . MULTI CTR calls - OUTBOUND')
   print(' ... multi CTR calls : Outbound calls, only first record has data')
   rpt <- df_multiple %>% 
@@ -348,7 +589,7 @@ fn_CTR_data_collapse <- function(df_single, df_multiple) {
     filter(initiationmethod == 'DISCONNECT') %>% 
     tally()
   print(paste0(' ... loosing ', rpt,' non-informative inbound records'))
-
+  
   # now we need to throw away the final DISCONNECT records because there is no info on them
   # they are different to when a final record which is QUEUE_TRANSFER and is informative
   df_inbound <- df_inbound %>% 
@@ -361,14 +602,26 @@ fn_CTR_data_collapse <- function(df_single, df_multiple) {
     ungroup()
   
   callcount <- df_inbound %>% distinct(pipe.ctr_setid) %>% tally()
-  print(paste0(' ... multi CTR calls : ',callcount,' Inbound calls after DISCONNECT record removal'))
+  print(paste0(' ... multi CTR calls : ',callcount,' Inbound calls, after DISCONNECT removal'))
   
-  rpt <- df_inbound %>% 
-    distinct(pipe.ctr_setid) %>% 
-    tally()
-  print(paste0(' ... multi CTR calls : Inbound calls FINAL CLEAN COUNT ', rpt,' calls' ))
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # move any ctrs which are now 'only' to the single dataset
+  df_only <- df_inbound %>% filter(pipe.ctr_type == 'only')
+  df_single <- df_single %>% bind_rows(df_only)
   
-  # get queue info from across the whole record set
+  callcount <- df_only %>% distinct(pipe.ctr_setid) %>% tally()
+  print(paste0(' ... multi CTR calls : ',callcount,' moved to single CTR dataset'))
+  
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # keep remaining true multi CTR inbound calls
+  df_inbound <- df_inbound %>% filter(pipe.ctr_type != 'only')
+  
+  callcount <- df_inbound %>% distinct(pipe.ctr_setid) %>% tally()
+  print(paste0(' ... multi CTR calls : ',callcount,' true multi-CTR calls remain'))
+  
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # get queue info from across the whole CTR record set
+  
   print(' ... multi CTR calls : Inbound calls, counting queue hops over informative records')
   df_inbound <- df_inbound %>% 
     group_by(pipe.ctr_setid) %>% 
@@ -377,10 +630,17 @@ fn_CTR_data_collapse <- function(df_single, df_multiple) {
     mutate(pipe.queue.total = sum(as.integer(queue.duration))) %>% 
     ungroup() 
   
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   print(' ... multi CTR calls : Inbound calls, create single call record from first and final records')
-  # then get info from first ctr, and add the exit variable
+  
+  # initiationtimestamp needs to be the one from the first ctr
+  df_inbound <- df_inbound %>% 
+    group_by(pipe.ctr_setid) %>% 
+    mutate(initiationtimestamp = first(initiationtimestamp)) %>% 
+    ungroup()
+  
   df_first <- df_inbound %>% 
-    filter(pipe.ctr_type %in% c('first','only')) %>% 
+    filter(pipe.ctr_type %in% c('first')) %>% 
     select(pipe.ctr_setid:customerendpoint.address) %>% 
     mutate(pipe.ctr_type = case_when(pipe.ctr_type == 'first' ~ 'multiple',
                                      T ~ 'only')) %>%
@@ -518,45 +778,74 @@ fn_CALL_to_ANALYSIS <- function(df_calls_input) {
 fn_CALL_ReferenceData <- function(df_input, google = TRUE) {
   # source('R_INCLUDE_References.R')
   
-  print(' ... Joining reference data')
-  print(' ... This needs updating to add a date clause in the join')
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # take a copy to manipulate
+  df_output <- df_input
+  rows_in <- nrow(df_input)
   
-  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # okta_id is always unique
   df_ref_okta <- fn_REF_get('okta')
-  df_output <- df_input %>% 
+  df_output <- df_output %>% 
     left_join(df_ref_okta, by = c('agent.username' = 'okta_id'))
   
-  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  if (nrow(df_input) != nrow(df_output)) stop('join creates records')
+  
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # member_id is always unique
   df_ref_mbr <- fn_REF_get('mbr')
   df_output <- df_output %>% 
     left_join(df_ref_mbr %>% select(member_aws, ref.lss.fullname, ref.lss.shortname), by = c('attributes.formember' = 'member_aws')) 
-  
-  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  if (nrow(df_input) != nrow(df_output)) stop('join creates records')
+
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # phone no to service mapping, date dependent
   df_ref_phonenos <- fn_REF_get('phonenos')
+  df_ref_phonenos <- fn_REF_expand('phonenos', df_ref_phonenos)
+  
   df_output <- df_output %>% 
-    left_join(df_ref_phonenos, by = c('systemendpoint.address' = 'ref.phone')) %>% 
-    left_join(df_ref_phonenos %>% select(ref.transferno = ref.phone, ref.transfer.service = ref.phone.service), by = c('transferredtoendpoint.address' = 'ref.transferno'))
+    left_join(df_ref_phonenos, by = c('systemendpoint.address' = 'ref.phone', 
+                                      'pipe.when_date' = 'ref.phone.date')) 
+  
+  # check 
+  rows_out <- nrow(df_output)
+  if (rows_in != rows_out) {
+    print(paste0(' ... input rows ',rows_in,' output ',rows_out))
+    stop('join creates records')
+  }
+  
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # transfer calls
+  # df_output <- df_output %>% 
+  #   left_join(df_ref_phonenos %>% 
+  #               select(ref.transferno = ref.phone, ref.transfer.service = ref.phone.service), 
+  #             by = c('transferredtoendpoint.address' = 'ref.transferno'))
+  # if (nrow(df_input) != nrow(df_output)) stop('join creates records')
   
   # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   df_ref_queue <- fn_REF_get('queue')
   df_output <- df_output %>% 
     left_join(df_ref_queue %>% select(ref.queue, ref.queue.service, ref.queue.description), by = c('queue.name' = 'ref.queue'))
+  if (nrow(df_input) != nrow(df_output)) stop('join creates records')
   
   # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   df_ref_algroups <- fn_REF_get('algroup')
   df_output <- df_output %>% 
     left_join(df_ref_algroups %>% select(member_aws, ref.formember.advicegroup = member_group), by = c('attributes.formember' = 'member_aws')) %>% 
     left_join(df_ref_algroups %>% select(member_aws, ref.okta.advicegroup = member_group), by = c('ref.okta.member' = 'member_aws')) 
+  if (nrow(df_input) != nrow(df_output)) stop('join creates records')
   
   # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   df_ref_single <- fn_REF_get('single')
   df_output <- df_output %>% 
     left_join(df_ref_single %>% select(single_queue, ref.single_group = single_group), by = c('queue.name' = 'single_queue')) 
+  if (nrow(df_input) != nrow(df_output)) stop('join creates records')
   
   # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   df_ref_alink <- fn_REF_get('alink')
   df_output <- df_output %>% 
     left_join(df_ref_alink, by = c('systemendpoint.address' = 'ref.alink.phone'))
+  if (nrow(df_input) != nrow(df_output)) stop('join creates records')
   
   return(df_output)
   
@@ -686,76 +975,47 @@ fn_reorder <- function(df_input) {
 }
 
 # RETURN reference datasets
-fn_REF_get <- function(what, show = FALSE, google = FALSE, raw = FALSE) {
+fn_REF_get <- function(what, show = FALSE) {
   
   what <- tolower(what)
   valid_whats <- c('okta','mbr','phonenos','queue','algroup','single','alink')
+  
   if (!(what %in% valid_whats)) {
     print(paste0(' ... ',what,' is not in valid arguements of ',paste0(valid_whats, collapse = ',')))
   }
   
-  what <- tolower(what)
-  # reference tables
-  ref_dir <- 'G:/Shared drives/CA - Interim Connect Report Log Files & Guidance/Interim Reports/Reference Tables/'
-  ref_sheet <- 'https://docs.google.com/spreadsheets/d/1FEcmgQmYk_Dmf9IgjM1CdYjSFTMQzHB2DyiMpzpbCas/edit#gid=1612332652'
+  # pick up from the parquet files in the source folder
+  url_list <- fn_ref_url()
+  ref_dir <- url_list$url_path
+  ref_title <- url_list$url_title
   
   # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~  
   if (what == 'phonenos') {
-    if (google == FALSE) {
-      # late entries
-      df_late <- tribble(~ref.phone.service, ~ref.phone,
-                         "Durham DRO","+448081897301",
-                         "Durham DRO","+448081641912",
-                         "Durham DRO","+441917504080")
-      
-      # phone nos to service mapping
-      ref_file_phonenos <- 'reference_phonenumbers.parquet'
-      df_ref_phonenos <- read_parquet(paste0(ref_dir, ref_file_phonenos), col_types = cols(.default='c')) %>%
-        distinct(ref.phone.service, ref.phone) %>% 
-        bind_rows(df_late)
-      
-    } else {
-      
-      ref_tab <- 'reference_phonenumbers'
-      df_ref_phonenos <- googlesheets4::read_sheet(ref_sheet, ref_tab)
-      if (raw) return (df_ref_phonenos)
-      names(df_ref_phonenos) <- tolower(names(df_ref_phonenos))
-      
-      # get the variables we need
-      df_ref_phonenos <- df_ref_phonenos %>% 
-        select(ref.phone = `phone number`,
-               ref.phone.service = service,
-               date_first = `date added`,
-               date_final = `date removed`) %>% 
-        mutate(date_first = as.character(date_first)) %>% 
-        mutate(date_final = as.character(date_final)) %>% 
-        mutate(date_final = str_remove_all(date_final, ' ')) %>% 
-        mutate(date_final = case_when(is.na(date_final) ~ as.character(Sys.Date()),
-                                      date_final == '' ~ as.character(Sys.Date()),
-                                      T ~ date_final)) 
-    }
+    ref_tab <- 'reference_phonenumbers'
+    ref_file <- paste0(ref_dir,ref_tab,'.parquet')
     
-    if (df_ref_phonenos %>% count(ref.phone) %>% filter(n > 1) %>% tally() > 0) {
-      print(' ... Phone Service Duplicates !')
-      df_ref_phonenos %>% add_count(ref.phone) %>% filter(n > 1)
+    # any null dates need to be set to today so they will join 
+    # with call dates
+    df_ref_phonenos <- read_parquet(ref_file, col_types = c(.default = 'c')) %>% 
+      mutate(ref.phone.finish = coalesce(ref.phone.finish, as.character(Sys.Date()))) %>% 
+      select(ref.phone, ref.phone.service, ref.phone.start, ref.phone.finish)
+    
+    ref.check <- df_ref_phonenos %>% 
+      arrange(ref.phone, ref.phone.start) %>% 
+      group_by(ref.phone) %>% 
+      mutate(prev.finish = lag(ref.phone.finish)) %>% 
+      mutate(overlap = ref.phone.start <= prev.finish) %>% 
+      ungroup() %>% 
+      filter(overlap == TRUE) %>% 
+      tally()
+    
+    # check phonenumbers are unique
+    if (ref.check > 0) {
+      print(' ... ERROR : Phone Service Duplicates or overlapping dates !')
       return('')
     } 
     
-    if (google == TRUE) {
-      
-      print(' ... creating date based Phones dataset')
-      # make a record per valid date so we can do date based joins later
-      df_ref_phonenos <- df_ref_phonenos %>% 
-        mutate(date_first = as.Date(date_first)) %>% 
-        mutate(date_final = as.Date(date_final)) %>% 
-        group_by(ref.phone, ref.phone.service) %>% 
-        group_modify(~ {date_valid <- seq.Date(from = .x$date_first, to = .x$date_final, by = 1) 
-        crossing(.x[,1], date_valid)}) %>% 
-        ungroup() %>% 
-        select(ref.phone, ref.phone.service, date_valid)
-    } 
-    
-    print(' ... Phone Service data passed')
+    print(' ... Phone Service data passed - no duplicates or overlaps')
     if (show) glimpse(df_ref_phonenos)
     
     return(df_ref_phonenos)
@@ -763,36 +1023,10 @@ fn_REF_get <- function(what, show = FALSE, google = FALSE, raw = FALSE) {
   
   # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~  
   if (what == 'queue') {
-    # late entries
-    if (google == FALSE) {
-      df_late <- tribble(~ref.queue.service, ~ref.queue, ~ref.queue.description,
-                         "Durham DRO","Q_950033_ser028", "Durham DRO (Debt Relief Orders)")
-      
-      # queue name to service mapping
-      ref_file_queue <- 'reference_queues.parquet'
-      df_ref_queue <- read_parquet(paste0(ref_dir, ref_file_queue), col_types = cols(.default='c')) %>% 
-        mutate(ref.queue.description = case_when(ref.queue.description == '#REF!' ~ '', T ~ ref.queue.description)) %>% 
-        bind_rows(df_late)
-      
-    } else {
-      ref_tab <- 'reference_queues'
-      df_ref_queue <- googlesheets4::read_sheet(ref_sheet, ref_tab)
-      if (raw) return (df_ref_queue)
-      names(df_ref_queue) <- tolower(names(df_ref_queue))
-      
-      df_ref_queue <- df_ref_queue %>% 
-        select(ref.queue = `queue`,
-               ref.queue.service = service,
-               ref.queue.description = description,
-               date_first = `date added`,
-               date_final = `date removed`) %>% 
-        mutate(date_first = as.character(date_first)) %>% 
-        mutate(date_final = as.character(date_final)) %>% 
-        mutate(date_final = str_remove_all(date_final, ' ')) %>% 
-        mutate(date_final = case_when(is.na(date_final) ~ as.character(Sys.Date()),
-                                      date_final == '' ~ as.character(Sys.Date()),
-                                      T ~ date_final))
-    }
+    
+    ref_tab <- 'reference_queues'
+    ref_file <- paste0(ref_dir,ref_tab,'.parquet')
+    df_ref_queue <- read_parquet(ref_file, col_types = c(.default = 'c'))
     
     if (df_ref_queue %>% count(ref.queue) %>% filter(n > 1) %>% tally() > 0) {
       print(' ... Queue Duplicates !')
@@ -808,17 +1042,11 @@ fn_REF_get <- function(what, show = FALSE, google = FALSE, raw = FALSE) {
   
   # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~  
   if (what == 'okta') {
-    print(paste0(' ... getting ref data from ',ref_dir))
-    # advisers from okta 
-    # join key is agent.username = okta_id
-    ref_file_okta <- 'reporting_oktaadvisers.csv'
-    # print(ref_file_okta)
     
-    df_ref_okta <- read_csv(paste0(ref_dir, ref_file_okta), col_types = cols(.default='c')) %>% 
-      filter(!is.na(okta_id)) %>% 
-      rename(ref.okta.member = member_aws,
-             ref.okta.advisername = reportingname,
-             ref.okta.office = office)
+    ref_tab <- 'reference_oktaadvisers'
+    ref_file <- paste0(ref_dir,ref_tab,'.parquet')
+    df_ref_okta <- read_parquet(ref_file, col_types = c(.default = 'c'))
+    
     if (df_ref_okta %>% count(okta_id) %>% filter(n > 1) %>% tally() > 0) {
       print(' ... Duplicate OKTA IDS !')
     } else {
@@ -830,11 +1058,11 @@ fn_REF_get <- function(what, show = FALSE, google = FALSE, raw = FALSE) {
   
   # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~  
   if (what == 'mbr') {
-    # MBR info from LSS
-    ref_file_mbr <- 'reference_mbr.parquet'
-    df_ref_mbr <- read_parquet(paste0(ref_dir, ref_file_mbr), col_types = cols(.default='c')) %>% 
-      filter(!is.na(member_id)) %>% 
-      select(member_aws, ref.lss.fullname = member_name, ref.lss.shortname = member_short)
+    
+    ref_tab <- 'reference_mbr'
+    ref_file <- paste0(ref_dir,ref_tab,'.parquet')
+    df_ref_mbr <- read_parquet(ref_file, col_types = c(.default = 'c')) %>% 
+      filter(!is.na(member_aws))
     
     if (df_ref_mbr %>% count(member_aws) %>% filter(n > 1) %>% tally() > 0) {
       print(' ... MBR Duplicates !')
@@ -848,9 +1076,11 @@ fn_REF_get <- function(what, show = FALSE, google = FALSE, raw = FALSE) {
   
   # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~  
   if (what == 'algroup') {
-    # MBR to adviceline groups
-    ref_file_algroups <- 'reference_adviceline_groups.parquet'
-    df_ref_algroups <- read_parquet(paste0(ref_dir, ref_file_algroups), col_types = cols(.default='c'))
+    
+    ref_tab <- 'reference_adviceline_groups'
+    ref_file <- paste0(ref_dir,ref_tab,'.parquet')
+    df_ref_algroups <- read_parquet(ref_file, col_types = c(.default = 'c'))
+    
     if (df_ref_algroups %>% count(member_aws) %>% filter(n > 1) %>% tally() > 0) {
       print(' ... AL groups Duplicates !')
       df_ref_algroups %>% add_count(member_aws) %>% filter(n > 1)
@@ -863,9 +1093,11 @@ fn_REF_get <- function(what, show = FALSE, google = FALSE, raw = FALSE) {
   
   # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~  
   if (what == 'single') {
-    # single queues
-    ref_file_single <- 'reference_single_queue.parquet'
-    df_ref_single <- read_parquet(paste0(ref_dir, ref_file_single), col_types = cols(.default='c'))
+    
+    ref_tab <- 'reference_single_queue'
+    ref_file <- paste0(ref_dir,ref_tab,'.parquet')
+    df_ref_single <- read_parquet(ref_file, col_types = c(.default = 'c'))
+    
     if (df_ref_single %>% count(single_queue) %>% filter(n > 1) %>% tally() > 0) {
       print(' ... Single groups Duplicates !')
       df_ref_single %>% add_count(single_queue) %>% filter(n > 1)
@@ -875,11 +1107,14 @@ fn_REF_get <- function(what, show = FALSE, google = FALSE, raw = FALSE) {
     }
     return(df_ref_single)
   }
+  
   # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   if (what == 'alink') {
-    # # advicelink services
-    ref_file_advicelink <- 'reference_advicelink_services.parquet'
-    df_ref_alink <- read_parquet(paste0(ref_dir, ref_file_advicelink), col_types = cols(.default='c'))
+    
+    ref_tab <- 'reference_advicelink_services'
+    ref_file <- paste0(ref_dir,ref_tab,'.parquet')
+    df_ref_alink <- read_parquet(ref_file, col_types = c(.default = 'c'))
+    
     if (df_ref_alink %>% count(ref.alink.phone) %>% filter(n > 1) %>% tally() > 0) {
       print(' ... Advicelink services Duplicates !')
       df_ref_alink %>% add_count(ref.alink.phone) %>% filter(n > 1)
@@ -889,6 +1124,47 @@ fn_REF_get <- function(what, show = FALSE, google = FALSE, raw = FALSE) {
     }
     return(df_ref_alink)
   }
+}
+
+# expand start/finish date to get around R not having a 'between' join 
+fn_REF_expand <- function(what, df_ref_in) {
+  
+  what <- tolower(what)
+  valid_whats <- c('okta','mbr','phonenos','queue','algroup','single','alink')
+
+  if (!(what %in% valid_whats)) {
+    print(paste0(' ... ',what,' is not in valid arguements of ',paste0(valid_whats, collapse = ',')))
+  }
+
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  if (what == 'phonenos') {
+    print(' ... expanding dates')
+    for (i in seq(1, nrow(df_ref_in))) {
+      ref.phone <- df_ref_in[i, c('ref.phone')] %>% as.character()
+      ref.phone.service <- df_ref_in[i, c('ref.phone.service')] %>% as.character()
+      ref.phone.start <- df_ref_in[i, c('ref.phone.start')] %>% as.character()
+      ref.phone.finish <- df_ref_in[i, c('ref.phone.finish')] %>% as.character()
+
+      ref.seq <- as_tibble(seq(as.Date(ref.phone.start), as.Date(ref.phone.finish), by = 1)) %>%
+        rename(ref.phone.date = value) %>%
+        mutate(ref.phone = ref.phone,
+               ref.phone.service = ref.phone.service,
+               ref.phone.start = ref.phone.start,
+               ref.phone.finish = ref.phone.finish) %>%
+        select(ref.phone.date, ref.phone, ref.phone.service) %>%
+        identity()
+
+      if (i == 1) {
+        df_ref_out = ref.seq
+      } else {
+        df_ref_out <- bind_rows(df_ref_out, ref.seq)
+      }
+    }
+    return(df_ref_out)
+  }
+
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
 }
 
 # REFORMAT remove hashtags etc from strings
@@ -972,243 +1248,439 @@ fn_STRING_fixes <- function(text_in) {
   return(text_out)
 }
 
+# where reference data is sourced on G:
+fn_ref_url <- function() {
+  
+  url_path <- 'G:/Shared drives/CA - Interim Connect Report Log Files & Guidance/Interim Reports/Reference Tables/'
+  url_title <- 'Reference Data - Calls dataset - 2023-05-24 onwards'
+  url_source <- 'https://docs.google.com/spreadsheets/d/1jmzZXW3gKeG_e3l_x2ECMQ1sE84AeSj8UiAlknU5-us/edit#gid=1152636255'
+
+  url_brian_title <- 'Reporting Reference Data Updates - running workbook'
+  url_brian <- 'https://docs.google.com/spreadsheets/d/1FEcmgQmYk_Dmf9IgjM1CdYjSFTMQzHB2DyiMpzpbCas/edit#gid=1617783057'
+  
+  ret_list <- list(url_path = url_path,
+                   url_title = url_title,
+                   url_source = url_source,
+                   url_brian_title = url_brian_title,
+                   url_brian = url_brian)
+  
+  return(ret_list)
+}
+
+# check a string is a valid date
+checkdate = function(mydate, nullOK = TRUE) {
+  
+  if (nullOK == TRUE & is.na(mydate)) return(TRUE)
+  
+  y <- as.integer(str_sub(mydate, 1, 4))
+  m <- as.integer(str_sub(mydate, 6, 7))
+  d <- as.integer(str_sub(mydate, 9, 10))
+  
+  #Convert to an R Date object.
+  #If the date is not valid, NA is returned.
+  dt = as.Date(paste(y, m, d, sep='-'), optional=TRUE)
+  
+  ifelse(is.na(dt), FALSE, TRUE)
+}
+
+# check brians reference sheet before adding it to the aws sheet
+fn_check_refdata <- function(what) {
+  
+  what <- tolower(what)
+  valid_whats <- c('reference_phonenumbers','reference_queues')
+  
+  if (!(what %in% valid_whats)) {
+    print(paste0(' ... ',what,' is not in valid arguements of ',paste0(valid_whats, collapse = ',')))
+  }
+  
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  if (what == 'reference_phonenumbers') {
+    
+    sheet_ok <- 'OK'
+    sheet <- what
+    cols_in <- c('added by','date added','date removed','service','phone number','description')
+    df_in <- read_sheet(url_brian, sheet, col_types = c(.default = 'c')) %>%
+      rename_with(., tolower) %>%
+      select(any_of(cols_in)) %>%
+      identity()
+    
+    # check everything is there
+    if (length(cols_in) != ncol(df_in)) {
+      print(paste0(' ... column mismatch for ',sheet))
+      sheet_ok <- 'Some columns are missing from brians sheet'
+    }
+    
+    # reformat for output
+    cols_out <- c('ref.phone.author', 'ref.phone.start', 'ref.phone.finish', 'ref.phone.service', 'ref.phone', 'ref.phone.description')
+    df_out <- df_in %>%
+      rename(ref.phone.author = `added by`,
+             ref.phone.start = `date added`,
+             ref.phone.finish = `date removed`,
+             ref.phone.service = service,
+             ref.phone = `phone number`,
+             ref.phone.description = description) %>%
+      select(all_of(cols_out))
+    
+    # checks
+    # check 1. ref.phone.start is a valid date
+    print(' .. Checking Start date')
+    for (mydate in unique(df_out$ref.phone.start)) {
+      if (checkdate(mydate, nullOK = FALSE) == FALSE) {
+        print(paste0(' ... Invalid start date in ',sheet,' is ',mydate))
+        sheet_ok <- paste0('Invalid start date ', mydate)
+      }
+    }
+    
+    # check 2. ref.phone.finish is a valid date or NULL
+    print(' .. Checking Finish date')
+    for (mydate in unique(df_out$ref.phone.finish)) {
+      if (checkdate(mydate) == FALSE) {
+        print(paste0(' ... Invalid finish date in ',sheet,' is ',mydate))
+        sheet_ok <- paste0('Invalid finish date ', mydate)
+      }
+    }
+    
+    # check 3. check key={phone number, date range} is unique
+    check_unique <- df_out %>%
+      select(ref.phone, ref.phone.start, ref.phone.finish) %>%
+      add_count(ref.phone) %>%
+      filter(n > 1) %>%
+      arrange(ref.phone, ref.phone.start) %>%
+      group_by(ref.phone) %>%
+      mutate(previous.finish = lag(ref.phone.finish)) %>%
+      mutate(error = ref.phone.start <= previous.finish) %>%
+      filter(error == TRUE) %>%
+      ungroup() %>%
+      identity()
+    
+    if (nrow(check_unique) > 0) {
+      print(' ... not all phone numbers are unique within date range')
+      sheet_ok <- ('not all phone numbers are unique within date range')
+    }
+    
+    ret_list <- list(ok = sheet_ok, df_ref = df_out)
+    return(ret_list)
+  }
+  
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  if (what == 'reference_queues') {
+    
+    sheet_ok <- 'OK'
+    sheet <- what
+    cols_in <- c('added by','date added','date removed','service','queue','description')
+    df_in <- read_sheet(url_brian, sheet, col_types = c(.default = 'c')) %>%
+      rename_with(., tolower) %>%
+      select(any_of(cols_in)) %>%
+      identity()
+    
+    # check everything is there
+    if (length(cols_in) != ncol(df_in)) {
+      print(paste0(' ... column mismatch for ',sheet))
+      sheet_ok <- 'Some columns are missing from brians sheet'
+    }
+    
+    # reformat for output
+    cols_out <- c('ref.queue.author', 'ref.queue.start', 'ref.queue.finish', 'ref.queue.service', 'ref.queue', 'ref.queue.description')
+    df_out <- df_in %>%
+      rename(ref.queue.author = `added by`,
+             ref.queue.start = `date added`,
+             ref.queue.finish = `date removed`,
+             ref.queue.service = service,
+             ref.queue = `queue`,
+             ref.queue.description = description) %>%
+      select(all_of(cols_out))
+    
+    # checks
+    # check 1. ref.phone.start is a valid date
+    print(' .. Checking Start date')
+    for (mydate in unique(df_out$ref.queue.start)) {
+      if (checkdate(mydate, nullOK = FALSE) == FALSE) {
+        print(paste0(' ... Invalid start date in ',sheet,' is ',mydate))
+        sheet_ok <- paste0('Invalid start date ', mydate)
+      }
+    }
+    
+    # check 2. ref.phone.finish is a valid date or NULL
+    print(' .. Checking Finish date')
+    for (mydate in unique(df_out$ref.queue.finish)) {
+      if (checkdate(mydate) == FALSE) {
+        print(paste0(' ... Invalid finish date in ',sheet,' is ',mydate))
+        sheet_ok <- paste0('Invalid finish date ', mydate)
+      }
+    }
+    
+    # check 3. check key={queue, date range} is unique
+    check_unique <- df_out %>%
+      select(ref.queue, ref.queue.start, ref.queue.finish) %>%
+      add_count(ref.queue) %>%
+      filter(n > 1) %>%
+      arrange(ref.queue, ref.queue.start) %>%
+      group_by(ref.queue) %>%
+      mutate(previous.finish = lag(ref.queue.finish)) %>%
+      mutate(error = ref.queue.start <= previous.finish) %>%
+      filter(error == TRUE) %>%
+      ungroup() %>%
+      identity()
+    
+    if (nrow(check_unique) > 0) {
+      print(' ... not all phone numbers are unique within date range')
+      sheet_ok <- ('not all phone numbers are unique within date range')
+    }
+    
+    ret_list <- list(ok = sheet_ok, df_ref = df_out)
+    return(ret_list)
+    
+  }
+  
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  if (what == 'reference_queues') {
+    sheet_ok <- 'OK'
+    sheet <- what
+    
+    ret_list <- list(ok = sheet_ok, df_ref = df_out)
+    return(ret_list)
+  }
+  
+}
+
+# --------------------------------------------------------------------------------
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # OLD STUFF
 # remove spurious DISCONNECT and TRANSFER records to leave a clean CTR based dataset, then
 # RETURN a list of three dataframes, one for multi CTR calls, one for single CTR calls, one for junked records
 # NOTE : All DISCONNECT records are artefacts, same TRANSFER records for OUTBOUND
 #        but TRANSFER records for INBOUND seem valid
-fn_CTR_data_clean_pass1 <- function(df_input) {
-  
-  # ~~~~~~~~~~~~~~~~~~
-  # first reduce the recordset by throwing away redundant records
-  df_ctr_basic <- df_input %>% 
-    # make a ctr_setid, and a variable to store the junk condition
-    mutate(pipe.ctr_setid = case_when(is.na(initialcontactid) ~ contactid, T ~ initialcontactid), .before = 1) %>%
-    # make dummy variables
-    mutate(pipe.ctr_orig = 0, .after = 'pipe.ctr_setid') %>% 
-    mutate(pipe.ctr_junk = 0, .after = 'pipe.ctr_orig') %>% 
-    mutate(junk = 'NO', .after = 'pipe.ctr_junk') %>%
-    mutate(junk = case_when(initiationmethod == 'DISCONNECT' ~ 'DISCONNECT CTR', T ~ junk)) %>% 
-    mutate(leg_count = 0, .after = 'junk') %>% 
-    mutate(leg_id = 0, .after = 'leg_count') %>% 
-    mutate(dup_check = paste0(initiationmethod,':',initiationtimestamp,':',disconnectreason,':',disconnecttimestamp), .after = 'pipe.ctr_junk') %>% 
-    mutate(pipe.queue.hops = NA, .after = 'pipe.ctr_junk') %>% 
-    mutate(pipe.queue.duration = NA, .after = 'pipe.queue.hops') %>% 
-    mutate(pipe.queue.total = NA, .after = 'pipe.queue.duration') %>% 
-    # collect some original audit stats
-    group_by(pipe.ctr_setid) %>% 
-    # original numbers of ctrs
-    mutate(pipe.ctr_orig = n()) %>% 
-    # number of ctrs junked
-    mutate(pipe.ctr_junk = sum(!junk == 'NO')) %>% 
-    ungroup() %>% 
-    identity()
-  
-  # split off the junk records
-  df_ctr_junk <- df_ctr_basic %>% filter(!junk == 'NO')
-  df_ctr <- df_ctr_basic %>% filter(junk == 'NO')
-  
-  # ~~~~~~~~~~~~~~~~~~
-  df_ctr_useful <- df_ctr %>% 
-    # find the number of CTR legs in the call
-    group_by(pipe.ctr_setid) %>%
-    mutate(leg_count = n()) %>%
-    mutate(leg_id = row_number()) %>%
-    
-    # find the call type
-    mutate(pipe.call_type = case_when(any(initiationmethod == 'INBOUND') ~ 'INBOUND', 
-                                      any(initiationmethod == 'OUTBOUND') ~ 'OUTBOUND',
-                                      T ~ 'OTHER'), .after = 1) %>% 
-    
-    ungroup()
-  
-  # ~~~~~~~~~~~~~~~~~~
-  # then split into single leg calls and multi leg calls because
-  # single leg calls are fine as they are
-  df_ctr_single <- df_ctr_useful %>% filter(leg_count == 1)
-  df_ctr_multiple <- df_ctr_useful %>% filter(leg_count > 1)
-  
-  # ~~~~~~~~~~~~~~~~~~
-  # Now evaluate the multi CTR dataset for records to junk
-  df_ctr_eval <- df_ctr_multiple %>% 
-    
-    group_by(pipe.ctr_setid) %>% 
-    arrange(pipe.ctr_setid, initiationtimestamp) %>% 
-    
-    # check for randomly created duplicates
-    mutate(junk = case_when(dup_check == lag(dup_check) ~ 'DUPLICATE OF PREVIOUS CTR', 
-                            T ~ junk)) %>% 
-    
-    # for outbound calls, throw away any legs greater than 1 with an inititationmethod of 'OUTBOUND'
-    # these seem to be duplicates on every occurance that I have checked
-    mutate(junk = case_when(row_number() > 1 & initiationmethod == 'OUTBOUND' ~ 'OUTBOUND NOT POSITION 1 IN CTR SET', 
-                            T ~ junk)) %>% 
-    
-    # for inbound calls, throw away any records with an initiationmethod of 'TRANSFER'
-    # and where the queue.name is blank AND the agent.username is blank, these seem to be system artefacts
-    mutate(junk = case_when(pipe.call_type == 'INBOUND' & 
-                              initiationmethod == 'TRANSFER' & 
-                              is.na(agent.username) & 
-                              is.na(queue.name) ~ 'INBOUND BLANK TRANSFERS', 
-                            T ~ junk)) %>% 
-    
-    # for outbound calls, throw away any records with an initiationmethod of 'TRANSFER'
-    # and where the agent.username is blank, these seem to be system artefacts
-    mutate(junk = case_when(pipe.call_type == 'OUTBOUND' & 
-                              initiationmethod == 'TRANSFER' & is.na(agent.username) ~ 'OUTBOUND BLANK TRANSFERS', 
-                            T ~ junk)) %>% 
-    
-    # for outbound calls, throw away any records with an initiationmethod of 'TRANSFER'
-    # and disconnectreason of 'CONTACT_FLOW_DISCONNECT' or 'CUSTOMER_DISCONNECT', these seem to be system artefacts
-    mutate(junk = case_when(pipe.call_type == 'OUTBOUND' &
-                              initiationmethod == 'TRANSFER' &
-                              disconnectreason %in% c('CONTACT_FLOW_DISCONNECT','CUSTOMER_DISCONNECT') ~ 'INBOUND TRANSFER TO CONTACT_FLOW_DISCONNECT',
-                            T ~ junk)) %>%
-    
-    # update the ctr_junk count
-    mutate(pipe.ctr_junk = pipe.ctr_junk + sum(!junk == 'NO')) %>% 
-    ungroup() 
-  
-  
-  # ~~~~~~~~~~~~~~~~~~
-  # add new junk records from the multiple CTR Call sets
-  df_ctr_junk <- df_ctr_junk %>% 
-    bind_rows(df_ctr_eval %>% filter(!junk == 'NO'))
-  
-  # these are ok, but now some will be single CTR sets
-  df_ctr_ok <- df_ctr_eval %>% filter(junk == 'NO')
-  
-  df_ctr_clean_single <- df_ctr_ok %>% 
-    group_by(pipe.ctr_setid) %>% 
-    filter(n() == 1) %>% 
-    ungroup()
-  
-  df_ctr_clean_multiple <- df_ctr_ok %>% 
-    group_by(pipe.ctr_setid) %>% 
-    filter(n() > 1) %>% 
-    ungroup()
-  
-  # reevaluate the datasets
-  df_ctr_single <- df_ctr_single %>% 
-    bind_rows(df_ctr_clean_single) %>% 
-    group_by(pipe.ctr_setid) %>%
-    mutate(leg_count = n()) %>%
-    mutate(leg_id = row_number()) %>%
-    ungroup()
-  
-  df_ctr_multiple <- df_ctr_clean_multiple %>% 
-    group_by(pipe.ctr_setid) %>%
-    mutate(leg_count = n()) %>%
-    mutate(leg_id = row_number()) %>%
-    ungroup()
-  
-  # ~~~~~~~~~~~~~~~~~~
-  df_ctr_junk <- df_ctr_junk %>% 
-    group_by(pipe.ctr_setid) %>% 
-    arrange(pipe.ctr_setid, initiationtimestamp) %>% 
-    mutate(pipe.ctr_type = case_when(n() == 1 ~ 'only',
-                                     row_number() == 1 ~ 'first',
-                                     row_number() == n() ~ 'final',
-                                     T ~ 'middle'), .after = 7) %>%
-    ungroup()
-  
-  df_ctr_single <- df_ctr_single %>% 
-    group_by(pipe.ctr_setid) %>% 
-    arrange(pipe.ctr_setid, initiationtimestamp) %>% 
-    mutate(pipe.ctr_type = case_when(n() == 1 ~ 'only',
-                                     row_number() == 1 ~ 'first',
-                                     row_number() == n() ~ 'final',
-                                     T ~ 'middle'), .after = 7) %>%
-    ungroup()
-  
-  df_ctr_multiple <- df_ctr_multiple %>% 
-    group_by(pipe.ctr_setid) %>% 
-    arrange(pipe.ctr_setid, initiationtimestamp) %>% 
-    mutate(pipe.ctr_type = case_when(n() == 1 ~ 'only',
-                                     row_number() == 1 ~ 'first',
-                                     row_number() == n() ~ 'final',
-                                     T ~ 'middle'), .after = 7) %>%
-    ungroup()
-  
-  # ~~~~~~~~~~~~~~~~~~
-  
-  df_list <- list(ctr_single = df_ctr_single, 
-                  ctr_multi = df_ctr_multiple, 
-                  ctr_junk = df_ctr_junk)
-  
-  return(df_list)
-  
-}
-
-# COPE with any multi-CTR calls records which have a genuine TRANSFER
-# make the TRANSFER into a call of it's own 
-fn_CTR_data_clean_pass2 <- function(df_ctr_single, df_ctr_multiple) {
-  
-  # remove TRANSFER records from the Call CTR set
-  # the original Call set can be related from the initial or previous contactid
-  df_ctr <- df_ctr_multiple %>% 
-    mutate(pipe.ctr_setid = case_when(initiationmethod == 'TRANSFER' ~ contactid, T ~ pipe.ctr_setid)) %>% 
-    group_by(pipe.ctr_setid) %>% 
-    arrange(pipe.ctr_setid, initiationtimestamp) %>% 
-    mutate(pipe.ctr_type = case_when(n() == 1 ~ 'only',
-                                     row_number() == 1 ~ 'first',
-                                     row_number() == n() ~ 'final',
-                                     T ~ 'middle'), .after = 7) %>%
-    ungroup()
-  
-  # add single records to the single dataset
-  df_ctr_2_single <- df_ctr %>% filter(pipe.ctr_type == 'only')
-  df_ctr_single <- df_ctr_single %>% bind_rows(df_ctr_2_single)
-  
-  # keep multiple ctr call sets
-  df_ctr_2_multi <- df_ctr %>% filter(pipe.ctr_type != 'only')
-  
-  # return
-  df_list <- list(ctr_single = df_ctr_single,
-                  ctr_multi = df_ctr_2_multi)
-  
-  return(df_list)
-}
-
-# COLLAPSE the multi-CTR dataframe into a single Call record
-fn_CTR_data_clean_pass3 <- function(df_ctr_single, df_ctr_multi) {
-  
-  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  # for single ctr calls queue info is just the same as the raw data
-  df_ctr_single <- df_ctr_single %>% 
-    mutate(pipe.queue.hops = queue.name) %>% 
-    mutate(pipe.queue.duration = queue.duration) %>% 
-    mutate(pipe.queue.total = as.integer(queue.duration))
-  
-  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  # for multi-ctr call datastes we need to collapse across all the ctrs
-  
-  # get queue info from across the whole record set
-  df_ctr_multi <- df_ctr_multi %>% 
-    group_by(pipe.ctr_setid) %>% 
-    mutate(pipe.queue.hops = paste(queue.name, collapse = ', ')) %>% 
-    mutate(pipe.queue.duration = paste(queue.duration, collapse = ', ')) %>% 
-    mutate(pipe.queue.total = sum(as.integer(queue.duration))) %>% 
-    ungroup() 
-  
-  # then get info from first ctr
-  df_first <- df_ctr_multi %>% 
-    filter(pipe.ctr_type == 'first') %>% 
-    select(pipe.ctr_setid:customerendpoint.address) %>% 
-    mutate(pipe.ctr_type = 'multiple') %>%
-    identity()
-  
-  df_final <- df_ctr_multi %>% 
-    filter(pipe.ctr_type == 'final') %>% 
-    select(pipe.ctr_setid, transferredtoendpoint.address:last_col()) %>% 
-    identity()
-  
-  # create a call record from the relevant bits of first, middle, final ctrs
-  df_call <- df_first %>% 
-    left_join(df_final, by = 'pipe.ctr_setid') %>% 
-    bind_rows(df_ctr_single)
-  
-  return(df_call)
-}
-
+# fn_CTR_data_clean_pass1 <- function(df_input) {
+#   
+#   # ~~~~~~~~~~~~~~~~~~
+#   # first reduce the recordset by throwing away redundant records
+#   df_ctr_basic <- df_input %>% 
+#     # make a ctr_setid, and a variable to store the junk condition
+#     mutate(pipe.ctr_setid = case_when(is.na(initialcontactid) ~ contactid, T ~ initialcontactid), .before = 1) %>%
+#     # make dummy variables
+#     mutate(pipe.ctr_orig = 0, .after = 'pipe.ctr_setid') %>% 
+#     mutate(pipe.ctr_junk = 0, .after = 'pipe.ctr_orig') %>% 
+#     mutate(junk = 'NO', .after = 'pipe.ctr_junk') %>%
+#     mutate(junk = case_when(initiationmethod == 'DISCONNECT' ~ 'DISCONNECT CTR', T ~ junk)) %>% 
+#     mutate(leg_count = 0, .after = 'junk') %>% 
+#     mutate(leg_id = 0, .after = 'leg_count') %>% 
+#     mutate(dup_check = paste0(initiationmethod,':',initiationtimestamp,':',disconnectreason,':',disconnecttimestamp), .after = 'pipe.ctr_junk') %>% 
+#     mutate(pipe.queue.hops = NA, .after = 'pipe.ctr_junk') %>% 
+#     mutate(pipe.queue.duration = NA, .after = 'pipe.queue.hops') %>% 
+#     mutate(pipe.queue.total = NA, .after = 'pipe.queue.duration') %>% 
+#     # collect some original audit stats
+#     group_by(pipe.ctr_setid) %>% 
+#     # original numbers of ctrs
+#     mutate(pipe.ctr_orig = n()) %>% 
+#     # number of ctrs junked
+#     mutate(pipe.ctr_junk = sum(!junk == 'NO')) %>% 
+#     ungroup() %>% 
+#     identity()
+#   
+#   # split off the junk records
+#   df_ctr_junk <- df_ctr_basic %>% filter(!junk == 'NO')
+#   df_ctr <- df_ctr_basic %>% filter(junk == 'NO')
+#   
+#   # ~~~~~~~~~~~~~~~~~~
+#   df_ctr_useful <- df_ctr %>% 
+#     # find the number of CTR legs in the call
+#     group_by(pipe.ctr_setid) %>%
+#     mutate(leg_count = n()) %>%
+#     mutate(leg_id = row_number()) %>%
+#     
+#     # find the call type
+#     mutate(pipe.call_type = case_when(any(initiationmethod == 'INBOUND') ~ 'INBOUND', 
+#                                       any(initiationmethod == 'OUTBOUND') ~ 'OUTBOUND',
+#                                       T ~ 'OTHER'), .after = 1) %>% 
+#     
+#     ungroup()
+#   
+#   # ~~~~~~~~~~~~~~~~~~
+#   # then split into single leg calls and multi leg calls because
+#   # single leg calls are fine as they are
+#   df_ctr_single <- df_ctr_useful %>% filter(leg_count == 1)
+#   df_ctr_multiple <- df_ctr_useful %>% filter(leg_count > 1)
+#   
+#   # ~~~~~~~~~~~~~~~~~~
+#   # Now evaluate the multi CTR dataset for records to junk
+#   df_ctr_eval <- df_ctr_multiple %>% 
+#     
+#     group_by(pipe.ctr_setid) %>% 
+#     arrange(pipe.ctr_setid, initiationtimestamp) %>% 
+#     
+#     # check for randomly created duplicates
+#     mutate(junk = case_when(dup_check == lag(dup_check) ~ 'DUPLICATE OF PREVIOUS CTR', 
+#                             T ~ junk)) %>% 
+#     
+#     # for outbound calls, throw away any legs greater than 1 with an inititationmethod of 'OUTBOUND'
+#     # these seem to be duplicates on every occurance that I have checked
+#     mutate(junk = case_when(row_number() > 1 & initiationmethod == 'OUTBOUND' ~ 'OUTBOUND NOT POSITION 1 IN CTR SET', 
+#                             T ~ junk)) %>% 
+#     
+#     # for inbound calls, throw away any records with an initiationmethod of 'TRANSFER'
+#     # and where the queue.name is blank AND the agent.username is blank, these seem to be system artefacts
+#     mutate(junk = case_when(pipe.call_type == 'INBOUND' & 
+#                               initiationmethod == 'TRANSFER' & 
+#                               is.na(agent.username) & 
+#                               is.na(queue.name) ~ 'INBOUND BLANK TRANSFERS', 
+#                             T ~ junk)) %>% 
+#     
+#     # for outbound calls, throw away any records with an initiationmethod of 'TRANSFER'
+#     # and where the agent.username is blank, these seem to be system artefacts
+#     mutate(junk = case_when(pipe.call_type == 'OUTBOUND' & 
+#                               initiationmethod == 'TRANSFER' & is.na(agent.username) ~ 'OUTBOUND BLANK TRANSFERS', 
+#                             T ~ junk)) %>% 
+#     
+#     # for outbound calls, throw away any records with an initiationmethod of 'TRANSFER'
+#     # and disconnectreason of 'CONTACT_FLOW_DISCONNECT' or 'CUSTOMER_DISCONNECT', these seem to be system artefacts
+#     mutate(junk = case_when(pipe.call_type == 'OUTBOUND' &
+#                               initiationmethod == 'TRANSFER' &
+#                               disconnectreason %in% c('CONTACT_FLOW_DISCONNECT','CUSTOMER_DISCONNECT') ~ 'INBOUND TRANSFER TO CONTACT_FLOW_DISCONNECT',
+#                             T ~ junk)) %>%
+#     
+#     # update the ctr_junk count
+#     mutate(pipe.ctr_junk = pipe.ctr_junk + sum(!junk == 'NO')) %>% 
+#     ungroup() 
+#   
+#   
+#   # ~~~~~~~~~~~~~~~~~~
+#   # add new junk records from the multiple CTR Call sets
+#   df_ctr_junk <- df_ctr_junk %>% 
+#     bind_rows(df_ctr_eval %>% filter(!junk == 'NO'))
+#   
+#   # these are ok, but now some will be single CTR sets
+#   df_ctr_ok <- df_ctr_eval %>% filter(junk == 'NO')
+#   
+#   df_ctr_clean_single <- df_ctr_ok %>% 
+#     group_by(pipe.ctr_setid) %>% 
+#     filter(n() == 1) %>% 
+#     ungroup()
+#   
+#   df_ctr_clean_multiple <- df_ctr_ok %>% 
+#     group_by(pipe.ctr_setid) %>% 
+#     filter(n() > 1) %>% 
+#     ungroup()
+#   
+#   # reevaluate the datasets
+#   df_ctr_single <- df_ctr_single %>% 
+#     bind_rows(df_ctr_clean_single) %>% 
+#     group_by(pipe.ctr_setid) %>%
+#     mutate(leg_count = n()) %>%
+#     mutate(leg_id = row_number()) %>%
+#     ungroup()
+#   
+#   df_ctr_multiple <- df_ctr_clean_multiple %>% 
+#     group_by(pipe.ctr_setid) %>%
+#     mutate(leg_count = n()) %>%
+#     mutate(leg_id = row_number()) %>%
+#     ungroup()
+#   
+#   # ~~~~~~~~~~~~~~~~~~
+#   df_ctr_junk <- df_ctr_junk %>% 
+#     group_by(pipe.ctr_setid) %>% 
+#     arrange(pipe.ctr_setid, initiationtimestamp) %>% 
+#     mutate(pipe.ctr_type = case_when(n() == 1 ~ 'only',
+#                                      row_number() == 1 ~ 'first',
+#                                      row_number() == n() ~ 'final',
+#                                      T ~ 'middle'), .after = 7) %>%
+#     ungroup()
+#   
+#   df_ctr_single <- df_ctr_single %>% 
+#     group_by(pipe.ctr_setid) %>% 
+#     arrange(pipe.ctr_setid, initiationtimestamp) %>% 
+#     mutate(pipe.ctr_type = case_when(n() == 1 ~ 'only',
+#                                      row_number() == 1 ~ 'first',
+#                                      row_number() == n() ~ 'final',
+#                                      T ~ 'middle'), .after = 7) %>%
+#     ungroup()
+#   
+#   df_ctr_multiple <- df_ctr_multiple %>% 
+#     group_by(pipe.ctr_setid) %>% 
+#     arrange(pipe.ctr_setid, initiationtimestamp) %>% 
+#     mutate(pipe.ctr_type = case_when(n() == 1 ~ 'only',
+#                                      row_number() == 1 ~ 'first',
+#                                      row_number() == n() ~ 'final',
+#                                      T ~ 'middle'), .after = 7) %>%
+#     ungroup()
+#   
+#   # ~~~~~~~~~~~~~~~~~~
+#   
+#   df_list <- list(ctr_single = df_ctr_single, 
+#                   ctr_multi = df_ctr_multiple, 
+#                   ctr_junk = df_ctr_junk)
+#   
+#   return(df_list)
+#   
+# }
+# 
+# # COPE with any multi-CTR calls records which have a genuine TRANSFER
+# # make the TRANSFER into a call of it's own 
+# fn_CTR_data_clean_pass2 <- function(df_ctr_single, df_ctr_multiple) {
+#   
+#   # remove TRANSFER records from the Call CTR set
+#   # the original Call set can be related from the initial or previous contactid
+#   df_ctr <- df_ctr_multiple %>% 
+#     mutate(pipe.ctr_setid = case_when(initiationmethod == 'TRANSFER' ~ contactid, T ~ pipe.ctr_setid)) %>% 
+#     group_by(pipe.ctr_setid) %>% 
+#     arrange(pipe.ctr_setid, initiationtimestamp) %>% 
+#     mutate(pipe.ctr_type = case_when(n() == 1 ~ 'only',
+#                                      row_number() == 1 ~ 'first',
+#                                      row_number() == n() ~ 'final',
+#                                      T ~ 'middle'), .after = 7) %>%
+#     ungroup()
+#   
+#   # add single records to the single dataset
+#   df_ctr_2_single <- df_ctr %>% filter(pipe.ctr_type == 'only')
+#   df_ctr_single <- df_ctr_single %>% bind_rows(df_ctr_2_single)
+#   
+#   # keep multiple ctr call sets
+#   df_ctr_2_multi <- df_ctr %>% filter(pipe.ctr_type != 'only')
+#   
+#   # return
+#   df_list <- list(ctr_single = df_ctr_single,
+#                   ctr_multi = df_ctr_2_multi)
+#   
+#   return(df_list)
+# }
+# 
+# # COLLAPSE the multi-CTR dataframe into a single Call record
+# fn_CTR_data_clean_pass3 <- function(df_ctr_single, df_ctr_multi) {
+#   
+#   # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   # for single ctr calls queue info is just the same as the raw data
+#   df_ctr_single <- df_ctr_single %>% 
+#     mutate(pipe.queue.hops = queue.name) %>% 
+#     mutate(pipe.queue.duration = queue.duration) %>% 
+#     mutate(pipe.queue.total = as.integer(queue.duration))
+#   
+#   # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   # for multi-ctr call datastes we need to collapse across all the ctrs
+#   
+#   # get queue info from across the whole record set
+#   df_ctr_multi <- df_ctr_multi %>% 
+#     group_by(pipe.ctr_setid) %>% 
+#     mutate(pipe.queue.hops = paste(queue.name, collapse = ', ')) %>% 
+#     mutate(pipe.queue.duration = paste(queue.duration, collapse = ', ')) %>% 
+#     mutate(pipe.queue.total = sum(as.integer(queue.duration))) %>% 
+#     ungroup() 
+#   
+#   # then get info from first ctr
+#   df_first <- df_ctr_multi %>% 
+#     filter(pipe.ctr_type == 'first') %>% 
+#     select(pipe.ctr_setid:customerendpoint.address) %>% 
+#     mutate(pipe.ctr_type = 'multiple') %>%
+#     identity()
+#   
+#   df_final <- df_ctr_multi %>% 
+#     filter(pipe.ctr_type == 'final') %>% 
+#     select(pipe.ctr_setid, transferredtoendpoint.address:last_col()) %>% 
+#     identity()
+#   
+#   # create a call record from the relevant bits of first, middle, final ctrs
+#   df_call <- df_first %>% 
+#     left_join(df_final, by = 'pipe.ctr_setid') %>% 
+#     bind_rows(df_ctr_single)
+#   
+#   return(df_call)
+# }
+# 
