@@ -231,6 +231,9 @@ fn_CALLS_outbound <- function(df_in) {
     mutate(pipe.inout_final = exit) %>% 
     select(-exit)
   
+  rpt.dropped <- nrow(df_in) - nrow(df_out)
+  print(paste0(' ... Dropping ',rpt.dropped,' secondary CTR records (TRANSFERS)'))
+  
   rpt.out <- df_out %>% distinct(pipe.ctr_setid) %>% tally()
   print(paste0(' ... OUTBOUND : records=',nrow(df_out),' calls=',rpt.out))
   

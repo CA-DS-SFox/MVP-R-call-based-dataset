@@ -11,7 +11,7 @@ source('R_INCLUDE_Functions_Reference.R')
 t1 <- Sys.time()
 
 # 1. get the source raw data
-month_to_process <- 'April'
+month_to_process <- 'March'
 df_raw <- fn_CTR_data_get(month = month_to_process, set_info = TRUE)
 
 # 2. create some computed variables, some will be empty and 
@@ -35,7 +35,7 @@ df_calls_in <- fn_CALLS_inbound(list_df$df_inbound)
 # 6. combine to give a call based dataset
 df_calls <- df_calls_in %>% bind_rows(df_calls_out)
 
-# write_parquet(df_calls, here('data','CALLS-april-V2.parquet'))
+# write_parquet(df_calls, here('data',paste0('CALLS-CLEAN-',month_to_process,'.parquet')))
 
 t2 <- Sys.time()
 print(paste0('CREATE CALL BASED DATASET takes ',round(t2 - t1, 1)))
@@ -46,6 +46,8 @@ print(paste0('CREATE CALL BASED DATASET takes ',round(t2 - t1, 1)))
 # 1. create transformed variables
 df_transform <- fn_CALL_to_ANALYSIS(df_calls)
 
+# write_parquet(df_calls, here('data',paste0('CALLS-ANALYSIS-',month_to_process,'.parquet')))
+
 # -------------------------------------------------------------------------
 # Stage 3 - Add reference data and service filters
 #           this can be done in ATHENA for now
@@ -55,6 +57,8 @@ df_refs <- fn_CALL_ReferenceData(df_transform, google = TRUE)
 
 # 2. create service filters
 df_defs <- fn_CALL_dataset_defs(df_refs)
+
+# write_parquet(df_defs, here('data','CALLS-april-V2.parquet'))
 
 # 3. reorder variables into human-logical format
 df_analysis <- fn_reorder(df_defs)
